@@ -388,6 +388,9 @@ class App:
             if not self.slots:
                 messagebox.showwarning("", "먼저 레이아웃을 분석하세요.")
                 return
+            tpl = core.template_path()
+            table = core.StyleTable(core.base_charpr_count(tpl))
+            body_cp = table.get("맑은 고딕", False, 10.5, "#1A1A1A")
             xml, z = [], 0
             for s in self.shapes:
                 if s["k"] == "rect":
@@ -398,7 +401,12 @@ class App:
                                              stroke=s["stroke"] or "#000000",
                                              lw=s["lw"] or 0.5, z=z))
                 else:
-                    inner = core.paras_from_parts([{"t": s["s"]}], width_hu=core.hu(s["w"] + 8))
+                    # 원본 글자의 폰트, 크기, 색을 그대로 재현한다
+                    cp = table.from_span(s.get("font", ""), s["size"],
+                                         int(s.get("color", "#000000")[1:], 16),
+                                         s.get("italic", False))
+                    inner = core.paras_from_parts([{"t": s["s"]}], char_pr=cp,
+                                                  width_hu=core.hu(s["w"] + 8))
                     xml.append(core.rect_xml(s["x"] - 1, s["y"] - 2, s["w"] + 8, s["h"] + 6,
                                              fill=None, stroke=None, lw=0, z=z, inner=inner))
                 z += 1
@@ -409,14 +417,24 @@ class App:
                     continue
                 parts = parse_markup(txt)
                 n_eq += count_eq(parts)
-                inner = core.paras_from_parts(parts, width_hu=core.hu(w))
+                inner = core.paras_from_parts(parts, char_pr=body_cp, width_hu=core.hu(w))
                 xml.append(core.rect_xml(x, y, w, h, fill=None, stroke=None, lw=0, z=z, inner=inner))
                 z += 1
             section = core.build_section("".join(xml), self.page_w, self.page_h)
             out = os.path.join(OUTDIR, "실습결과.hwpx")
-            core.write_hwpx(core.template_path(), section, out)
+            core.write_hwpx(tpl, section, out, style_table=table)
             self.say("HWPX 저장: %s (%.1f KB, 도형 %d, 수식 %d)"
                      % (out, os.path.getsize(out) / 1024, z, n_eq))
+            self.say("  글자모양 %d개, 폰트 %d종" % (len(table.rows), len(table.fonts)))
+            import tkinter.font as tkf
+            installed = set(tkf.families())
+            missing = [f for f in table.fonts if f not in installed]
+            for f in table.fonts:
+                self.say("    %s %s" % ("O" if f not in missing else "X", f))
+            if missing:
+                self.say("  없는 폰트는 한글이 임의로 대체합니다. 원본대로 나오려면 설치하세요.")
+                self.say("  Pretendard: github.com/orioncactus/pretendard/releases")
+                self.say("  나눔글꼴: hangeul.naver.com/font    NEXON Lv1 Gothic: brand.nexon.com")
         except Exception:
             self.say(traceback.format_exc())
 

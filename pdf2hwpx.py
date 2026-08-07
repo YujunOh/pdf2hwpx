@@ -92,7 +92,10 @@ def extract_layout(pdf_path, pageno, clip=None):
                     continue
                 out.append({"k": "text", "x": bb[0] - ox, "y": bb[1] - oy,
                             "w": bb[2] - bb[0], "h": bb[3] - bb[1],
-                            "s": s, "size": sp["size"], "color": "#%06X" % sp.get("color", 0)})
+                            "s": s, "size": sp["size"],
+                            "color": span_color(sp.get("color", 0)),
+                            "font": sp.get("font", ""),
+                            "italic": bool(sp.get("flags", 0) & 2)})
     doc.close()
     return out
 
@@ -189,6 +192,143 @@ def line_xml(x1, y1, x2, y2, stroke="#000000", lw=0.5, z=0):
 # ---------------------------------------------------------------- 3. 텍스트와 수식
 def esc(s):
     return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+# ---------------------------------------------------------------- 글자모양
+# 굵기가 이름에 흡수되는 폰트. Windows GDI 패밀리 이름이 따로 잡히는 것들이다.
+# Regular와 Bold만 한 패밀리를 공유하고, Light/Medium 같은 중간 굵기는
+# 각자 독립 패밀리라 face에 굵기를 넣고 bold 플래그는 켜지 않는다.
+FONT_ALIAS = {
+    "NanumMyeongjoExtraBold": ("나눔명조 ExtraBold", False),
+    "NanumMyeongjoBold": ("나눔명조", True),
+    "NanumMyeongjo": ("나눔명조", False),
+    "NanumGothicBold": ("나눔고딕", True),
+    "NanumGothic": ("나눔고딕", False),
+    "NEXONLv1GothicOTFRegular": ("NEXON Lv1 Gothic OTF", False),
+    "NEXONLv1GothicOTFBold": ("NEXON Lv1 Gothic OTF Bold", False),
+    "MalgunGothic": ("맑은 고딕", False),
+}
+
+WEIGHTS = ("ExtraLight", "SemiBold", "ExtraBold", "UltraLight", "Regular",
+           "Medium", "Light", "Bold", "Thin", "Black", "Heavy", "Normal")
+
+
+def normalize_font(name):
+    """PDF 폰트 이름 -> (한글에 넣을 face 이름, bold 플래그)."""
+    if not name:
+        return "함초롬바탕", False
+    n = re.sub(r"^[A-Z]{6}\+", "", name)          # 서브셋 접두사 제거
+    n = n.split(",")[0]
+    if n in FONT_ALIAS:
+        return FONT_ALIAS[n]
+    base, weight = n, ""
+    m = re.match(r"^(.*?)[-_ ]?(" + "|".join(WEIGHTS) + r")$", n)
+    if m:
+        base, weight = m.group(1), m.group(2)
+    base = base.rstrip("-_ ")
+    if base in FONT_ALIAS:
+        fam, _ = FONT_ALIAS[base]
+        base = fam
+    if weight in ("", "Regular", "Normal"):
+        return base, False
+    if weight == "Bold":
+        return base, True                          # RIBBI 짝이라 플래그로 표현
+    return "%s %s" % (base, weight), False         # 나머지는 독립 패밀리
+
+
+def span_color(c):
+    return "#%06X" % (int(c) & 0xFFFFFF)
+
+
+class StyleTable:
+    """수집한 글자모양을 header.xml에 넣을 수 있게 모은다."""
+
+    LANGS = ("HANGUL", "LATIN", "HANJA", "JAPANESE", "OTHER", "SYMBOL", "USER")
+
+    def __init__(self, base_charpr_count):
+        self.fonts = []                # face 이름 순서 목록
+        self.styles = {}               # key -> charPr id
+        self.rows = []                 # (id, fontidx, height, color, bold, italic)
+        self.next_id = base_charpr_count
+
+    def font_index(self, face):
+        if face not in self.fonts:
+            self.fonts.append(face)
+        return self.fonts.index(face)
+
+    def get(self, face, bold, size_pt, color="#000000", italic=False):
+        height = int(round(float(size_pt) * 100))
+        key = (face, bold, height, color, italic)
+        if key in self.styles:
+            return self.styles[key]
+        cid = self.next_id
+        self.next_id += 1
+        self.styles[key] = cid
+        self.rows.append((cid, self.font_index(face), height, color, bold, italic))
+        return cid
+
+    def from_span(self, font, size_pt, color=0, italic=False):
+        face, bold = normalize_font(font)
+        return self.get(face, bold, size_pt, span_color(color), italic)
+
+    # ---- header.xml 갱신
+    def font_xml(self, start_id):
+        return "".join(
+            '<hh:font id="%d" face="%s" type="TTF" isEmbedded="0"/>' % (start_id + i, esc(f))
+            for i, f in enumerate(self.fonts))
+
+    def charpr_xml(self, border_fill_ref, font_base):
+        out = []
+        for cid, fi, height, color, bold, italic in self.rows:
+            fid = font_base + fi
+            ref = " ".join('%s="%d"' % (l.lower(), fid) for l in
+                           ("hangul", "latin", "hanja", "japanese", "other", "symbol", "user"))
+            pct = lambda v: " ".join('%s="%d"' % (l.lower(), v) for l in
+                                     ("hangul", "latin", "hanja", "japanese", "other", "symbol", "user"))
+            out.append(
+                '<hh:charPr id="%d" height="%d" textColor="%s" shadeColor="none"'
+                ' useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="%s">'
+                '<hh:fontRef %s/><hh:ratio %s/><hh:spacing %s/><hh:relSz %s/><hh:offset %s/>'
+                '%s%s</hh:charPr>'
+                % (cid, height, color, border_fill_ref, ref,
+                   pct(100), pct(0), pct(100), pct(0),
+                   "<hh:italic/>" if italic else "",
+                   "<hh:bold/>" if bold else ""))
+        return "".join(out)
+
+
+def patch_header(header_xml, table):
+    """템플릿 header.xml에 폰트와 글자모양을 덧붙인다."""
+    if not table.rows:
+        return header_xml
+    s = header_xml
+
+    # 언어군마다 폰트를 같은 목록으로 추가한다. 언어군별로 id 공간이 따로 논다.
+    first_cnt = None
+    def add_fonts(m):
+        nonlocal first_cnt
+        head, cnt, body = m.group(1), int(m.group(2)), m.group(3)
+        if first_cnt is None:
+            first_cnt = cnt
+        return ('%s fontCnt="%d">%s%s</hh:fontface>'
+                % (head, cnt + len(table.fonts), body, table.font_xml(cnt)))
+
+    s = re.sub(r'(<hh:fontface\b[^>]*?)\s*fontCnt="(\d+)"\s*>(.*?)</hh:fontface>',
+               add_fonts, s, flags=re.S)
+    font_base = first_cnt if first_cnt is not None else 0
+
+    # borderFill 참조는 기존 charPr에서 쓰는 값을 그대로 빌린다
+    m = re.search(r'borderFillIDRef="(\d+)"', s)
+    bf = m.group(1) if m else "1"
+
+    def add_charprs(m2):
+        cnt = int(m2.group(1))
+        return ('<hh:charProperties itemCnt="%d">%s%s</hh:charProperties>'
+                % (cnt + len(table.rows), m2.group(2), table.charpr_xml(bf, font_base)))
+
+    s = re.sub(r'<hh:charProperties itemCnt="(\d+)">(.*?)</hh:charProperties>',
+               add_charprs, s, flags=re.S)
+    return s
 
 
 def eq_size(script):
@@ -298,8 +438,18 @@ def build_section(shapes_xml, page_w_pt, page_h_pt):
             % (NS, secpr, shapes_xml, hu(page_w_pt)))
 
 
-def write_hwpx(template, section_xml, out_path):
-    """템플릿 hwpx의 나머지 엔트리는 그대로 두고 section0.xml만 갈아끼운다."""
+def base_charpr_count(template):
+    """템플릿에 이미 정의된 글자모양 개수. 새 id는 그 다음부터 매긴다."""
+    try:
+        h = zipfile.ZipFile(template).read("Contents/header.xml").decode("utf-8")
+        m = re.search(r'<hh:charProperties itemCnt="(\d+)"', h)
+        return int(m.group(1)) if m else 0
+    except Exception:
+        return 0
+
+
+def write_hwpx(template, section_xml, out_path, style_table=None):
+    """템플릿 hwpx에서 section0.xml을 갈아끼우고, 글자모양이 있으면 header.xml도 고친다."""
     zin = zipfile.ZipFile(template, "r")
     if os.path.exists(out_path):
         os.remove(out_path)
@@ -308,6 +458,8 @@ def write_hwpx(template, section_xml, out_path):
         data = zin.read(item.filename)
         if item.filename == "Contents/section0.xml":
             data = section_xml.encode("utf-8")
+        elif item.filename == "Contents/header.xml" and style_table is not None:
+            data = patch_header(data.decode("utf-8"), style_table).encode("utf-8")
         if item.filename == "mimetype":
             zi = zipfile.ZipInfo("mimetype")
             zi.compress_type = zipfile.ZIP_STORED
