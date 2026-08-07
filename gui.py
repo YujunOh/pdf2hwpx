@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 """ditda 교재 자동조판 실습 GUI
 
-과정을 눈으로 보면서 실습하고 결과를 대조한다.
-  1단계  레이아웃 PDF를 열어 도형과 슬롯을 검출한다
-  2단계  검출된 슬롯에 문제와 수식을 넣는다
-  3단계  HWPX를 만들고 한글로 열어 원본과 나란히 대조한다
+왼쪽이 항상 미리보기다. HWPX에 들어갈 내용을 그대로 그리므로
+타이핑하는 동안 결과가 바로 보인다. 수식도 한글 없이 그린다.
 
 본 제품은 한글과컴퓨터의 한글 문서 파일(.hwp) 공개 문서를 참고하여 개발하였습니다.
 """
@@ -12,7 +10,7 @@ import os, re, sys, threading, traceback
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-# 고해상도 화면에서 흐릿하게 나오지 않도록. 캡처 좌표도 이걸 켜야 논리와 물리가 일치한다.
+# 고해상도 화면에서 흐릿하지 않도록. 캡처 좌표도 이걸 켜야 논리와 물리가 맞는다.
 if sys.platform == "win32":
     try:
         import ctypes
@@ -24,14 +22,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import fitz
-from PIL import Image, ImageTk
 import pdf2hwpx as core
+import preview as pv
 
 OUTDIR = os.path.join(core.work_dir(), "out")
 os.makedirs(OUTDIR, exist_ok=True)
 
-# exe에 PDF를 끌어다 놓거나 인자로 주면 그 파일로 시작한다
 DEFAULT_PDF = next((a for a in sys.argv[1:] if a.lower().endswith(".pdf")), "")
+
+MIN_W, MIN_H = 1180, 760
 
 SAMPLES = [
     "다음 식을 간단히 하시오.\n\n$(x+2y) ^{3} -(x-2y) ^{3}$\n\n"
@@ -46,27 +45,17 @@ SAMPLES = [
 ]
 
 EQ_PALETTE = [
-    ("분수", "{a} over {b}"),
-    ("근호", " sqrt {a}"),
-    ("적분", "int _{0} ^{1} f(x) dx"),
-    ("극한", " lim _{x ``rarrow`` 0} f(x)"),
-    ("합", " sum _{k=1} ^{n} a_{k}"),
-    ("위첨자", "x ^{2}"),
-    ("아래첨자", "a_{n}"),
-    ("괄호", "LEFT ( x RIGHT )"),
-    ("±", "+-"),
-    ("≥", "GEQ"),
-    ("→", "rarrow"),
-    ("π", "pi"),
+    ("분수", "{a} over {b}"), ("근호", "sqrt {a}"), ("적분", "int _{0} ^{1} f(x) dx"),
+    ("극한", "lim _{x ``rarrow`` 0} f(x)"), ("합", "sum _{k=1} ^{n} a_{k}"),
+    ("위첨자", "x ^{2}"), ("아래첨자", "a_{n}"), ("괄호", "left( x right)"),
+    ("±", "+-"), ("≥", "GEQ"), ("→", "rarrow"), ("π", "pi"),
 ]
 
 
-# ---------------------------------------------------------------- 원고 마크업 파서
 def parse_markup(text):
-    """`$...$` 안은 수식, 빈 줄과 줄바꿈은 br. -> parts 리스트"""
+    """달러 기호 사이는 수식, 줄바꿈은 br."""
     parts = []
-    lines = text.split("\n")
-    for i, line in enumerate(lines):
+    for i, line in enumerate(text.split("\n")):
         if i:
             parts.append({"br": True})
         for tok in re.split(r"(\$[^$]*\$)", line):
@@ -83,108 +72,120 @@ def count_eq(parts):
     return sum(1 for p in parts if "eq" in p)
 
 
-# ---------------------------------------------------------------- GUI
 class App:
     def __init__(self, root):
         self.root = root
         root.title("ditda 교재 자동조판 실습")
-        root.geometry("1500x950")
+        root.geometry("%dx%d" % (MIN_W + 220, MIN_H + 120))
+        # 버튼이 가려질 만큼 줄어들지 않게 막는다
+        root.minsize(MIN_W, MIN_H)
 
         self.pdf_path = tk.StringVar(value=DEFAULT_PDF)
         self.pageno = tk.IntVar(value=3)
         self.side = tk.StringVar(value="우면")
-        self.shapes = []
-        self.slots = []
-        self.sel = tk.IntVar(value=0)
-        self.texts = {}
-        self.page_img = None
-        self.scale = 1.0
-        self.origin = (0, 0)
+        self.showgrid = tk.BooleanVar(value=True)
+        self.zoomsel = tk.BooleanVar(value=False)
+        self.shapes, self.slots, self.texts = [], [], {}
+        self.sel = 0
+        self.page_w, self.page_h = 595.276, 841.89
+        self._job = None
         self.result_imgs = []
-
         self._build()
 
-    # ------------------------------------------------------------ 레이아웃
+    # ------------------------------------------------------------ 화면
     def _build(self):
-        top = ttk.Frame(self.root, padding=8)
+        top = ttk.Frame(self.root, padding=(8, 6))
         top.pack(fill="x")
-        ttk.Label(top, text="레이아웃 PDF", width=12).pack(side="left")
-        ttk.Entry(top, textvariable=self.pdf_path, width=70).pack(side="left", padx=4)
+        ttk.Label(top, text="레이아웃 PDF").pack(side="left")
+        ttk.Entry(top, textvariable=self.pdf_path).pack(side="left", padx=6, fill="x", expand=True)
         ttk.Button(top, text="찾아보기", command=self.pick).pack(side="left")
-        ttk.Label(top, text="  페이지").pack(side="left")
-        ttk.Spinbox(top, from_=1, to=999, width=5, textvariable=self.pageno).pack(side="left")
-        ttk.Label(top, text="  면").pack(side="left")
+        ttk.Label(top, text=" 쪽").pack(side="left")
+        ttk.Spinbox(top, from_=1, to=999, width=4, textvariable=self.pageno).pack(side="left")
         ttk.Combobox(top, textvariable=self.side, values=["전체", "좌면", "우면"],
-                     width=6, state="readonly").pack(side="left", padx=4)
-        ttk.Button(top, text="1. 레이아웃 분석", command=self.analyze).pack(side="left", padx=10)
+                     width=5, state="readonly").pack(side="left", padx=4)
+        ttk.Button(top, text="레이아웃 분석", command=self.analyze).pack(side="left", padx=(8, 0))
 
-        self.nb = ttk.Notebook(self.root)
-        self.nb.pack(fill="both", expand=True, padx=8, pady=4)
+        pane = ttk.PanedWindow(self.root, orient="horizontal")
+        pane.pack(fill="both", expand=True, padx=8, pady=4)
+        self.pane = pane
 
-        # --- 탭1 분석
-        t1 = ttk.Frame(self.nb)
-        self.nb.add(t1, text="1. 레이아웃 분석")
-        left = ttk.Frame(t1)
-        left.pack(side="left", fill="both", expand=True)
-        self.canvas = tk.Canvas(left, bg="#f4f4f4", highlightthickness=0)
+        # --- 왼쪽: 항상 보이는 미리보기
+        lf = ttk.LabelFrame(pane, text="미리보기 (HWPX에 들어갈 내용 그대로)", padding=4)
+        pane.add(lf, weight=3)
+        self.canvas = tk.Canvas(lf, bg="#e9e9ee", highlightthickness=0, width=560)
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Button-1>", self.click_canvas)
-        right = ttk.Frame(t1, width=380)
-        right.pack(side="right", fill="y")
-        right.pack_propagate(False)
-        ttk.Label(right, text="검출 결과", font=("맑은 고딕", 11, "bold")).pack(anchor="w", pady=(6, 2))
-        self.info = tk.Text(right, height=14, wrap="word", font=("맑은 고딕", 9))
-        self.info.pack(fill="x", padx=4)
-        ttk.Label(right, text="슬롯 (클릭하면 미리보기에서 선택)",
-                  font=("맑은 고딕", 10, "bold")).pack(anchor="w", pady=(10, 2))
-        self.slotbox = tk.Listbox(right, height=10, font=("Consolas", 9))
-        self.slotbox.pack(fill="x", padx=4)
-        self.slotbox.bind("<<ListboxSelect>>", self.pick_slot)
+        self.canvas.bind("<Configure>", lambda e: self.redraw())
+        bar = ttk.Frame(lf)
+        bar.pack(fill="x", pady=(4, 0))
+        ttk.Checkbutton(bar, text="슬롯 경계", variable=self.showgrid,
+                        command=self.redraw).pack(side="left")
+        ttk.Checkbutton(bar, text="선택 슬롯 확대", variable=self.zoomsel,
+                        command=self.redraw).pack(side="left", padx=8)
+        self.status = ttk.Label(bar, text="", foreground="#555555")
+        self.status.pack(side="right")
 
-        # --- 탭2 문제 입력
-        t2 = ttk.Frame(self.nb)
-        self.nb.add(t2, text="2. 문제 입력")
-        bar = ttk.Frame(t2, padding=6)
-        bar.pack(fill="x")
-        ttk.Label(bar, text="슬롯").pack(side="left")
-        self.slotsel = ttk.Combobox(bar, width=8, state="readonly")
+        # --- 오른쪽: 편집
+        rf = ttk.Frame(pane)
+        pane.add(rf, weight=2)
+
+        box = ttk.LabelFrame(rf, text="검출 결과", padding=6)
+        box.pack(fill="x")
+        self.info = ttk.Label(box, text="PDF를 고르고 레이아웃 분석을 누르세요.",
+                              justify="left", foreground="#333333")
+        self.info.pack(anchor="w")
+
+        sf = ttk.LabelFrame(rf, text="문제 입력", padding=6)
+        sf.pack(fill="both", expand=True, pady=6)
+        row = ttk.Frame(sf)
+        row.pack(fill="x")
+        ttk.Label(row, text="슬롯").pack(side="left")
+        self.slotsel = ttk.Combobox(row, width=8, state="readonly")
         self.slotsel.pack(side="left", padx=4)
         self.slotsel.bind("<<ComboboxSelected>>", self.switch_slot)
-        ttk.Button(bar, text="예시 넣기", command=self.fill_sample).pack(side="left", padx=6)
-        ttk.Button(bar, text="전체 슬롯에 예시", command=self.fill_all).pack(side="left")
-        ttk.Label(bar, text="   달러 기호 사이가 수식입니다.  예:  $1 over 2$",
-                  foreground="#666666").pack(side="left", padx=10)
+        ttk.Button(row, text="예시", width=6, command=self.fill_sample).pack(side="left", padx=2)
+        ttk.Button(row, text="전체 예시", width=9, command=self.fill_all).pack(side="left")
+        ttk.Button(row, text="비우기", width=7, command=self.clear_slot).pack(side="left", padx=2)
 
-        pal = ttk.LabelFrame(t2, text="수식 팔레트 (누르면 커서 위치에 삽입)", padding=6)
-        pal.pack(fill="x", padx=6)
+        pal = ttk.Frame(sf)
+        pal.pack(fill="x", pady=(6, 2))
         for i, (label, code) in enumerate(EQ_PALETTE):
-            ttk.Button(pal, text=label, width=7,
-                       command=lambda c=code: self.insert_eq(c)).grid(row=i // 6, column=i % 6, padx=2, pady=2)
+            ttk.Button(pal, text=label, width=8,
+                       command=lambda c=code: self.insert_eq(c)).grid(
+                           row=i // 6, column=i % 6, padx=1, pady=1, sticky="ew")
+        for c in range(6):
+            pal.columnconfigure(c, weight=1)
+        ttk.Label(sf, text="달러 기호 사이가 수식입니다.  예: $1 over 2$",
+                  foreground="#777777").pack(anchor="w", pady=(2, 4))
 
-        self.editor = tk.Text(t2, wrap="word", font=("맑은 고딕", 11), undo=True)
-        self.editor.pack(fill="both", expand=True, padx=6, pady=6)
-        self.editor.bind("<KeyRelease>", self.save_text)
+        self.editor = tk.Text(sf, wrap="word", font=("맑은 고딕", 11), undo=True, height=10)
+        self.editor.pack(fill="both", expand=True)
+        self.editor.bind("<KeyRelease>", self.on_type)
 
-        # --- 탭3 결과
-        t3 = ttk.Frame(self.nb)
-        self.nb.add(t3, text="3. 변환과 확인")
-        act = ttk.Frame(t3, padding=8)
+        act = ttk.Frame(rf)
         act.pack(fill="x")
-        ttk.Button(act, text="2. HWPX 만들기", command=self.build).pack(side="left")
-        ttk.Button(act, text="3. 한글로 열어 확인 (창이 잠깐 뜹니다)",
-                   command=self.verify).pack(side="left", padx=8)
-        ttk.Button(act, text="결과 폴더 열기", command=self.open_dir).pack(side="left")
-        self.result_canvas = tk.Canvas(t3, bg="#f4f4f4", highlightthickness=0)
-        self.result_canvas.pack(fill="both", expand=True, padx=6, pady=6)
+        ttk.Button(act, text="HWPX 만들기", command=self.build).pack(side="left")
+        ttk.Button(act, text="한글로 열어 확인", command=self.verify).pack(side="left", padx=6)
+        ttk.Button(act, text="결과 폴더", command=self.open_dir).pack(side="left")
 
-        # --- 로그
-        self.log = tk.Text(self.root, height=8, font=("Consolas", 9), bg="#1e1e1e", fg="#d4d4d4")
+        self.log = tk.Text(self.root, height=6, font=("Consolas", 9),
+                           bg="#1e1e1e", fg="#d4d4d4")
         self.log.pack(fill="x", padx=8, pady=(0, 8))
-        self.say("준비됨. 위에서 PDF를 고르고 '1. 레이아웃 분석'을 누르세요.")
+        self.say("준비됨.")
+        # 미리보기가 절반 넘게 차지하도록 초기 분할 위치를 잡는다
+        self.root.after(120, self._place_sash)
+
+    def _place_sash(self):
+        try:
+            self.root.update_idletasks()
+            w = self.root.winfo_width()
+            self.pane.sashpos(0, int(w * 0.53))
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ 유틸
-    def say(self, msg):
-        self.log.insert("end", msg + "\n")
+    def say(self, m):
+        self.log.insert("end", m + "\n")
         self.log.see("end")
         self.root.update_idletasks()
 
@@ -192,6 +193,7 @@ class App:
         p = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")])
         if p:
             self.pdf_path.set(p)
+            self.analyze()
 
     def open_dir(self):
         os.startfile(OUTDIR)
@@ -204,24 +206,22 @@ class App:
             return (w / 2, 0, w, page.rect.height)
         return None
 
-    # ------------------------------------------------------------ 1단계
+    # ------------------------------------------------------------ 분석
     def analyze(self):
         try:
             path = self.pdf_path.get()
+            if not path or not os.path.exists(path):
+                messagebox.showwarning("", "PDF 경로를 확인하세요.")
+                return
             pno = self.pageno.get() - 1
             doc = fitz.open(path)
+            if pno >= doc.page_count:
+                messagebox.showwarning("", "페이지 번호가 문서 범위를 넘습니다.")
+                doc.close(); return
             page = doc[pno]
             clip = self.clip_of(page)
             self.page_w = (clip[2] - clip[0]) if clip else page.rect.width
             self.page_h = page.rect.height
-
-            # 미리보기 렌더 (화면 표시용. 산출물에는 래스터가 안 들어간다)
-            mb = page.mediabox
-            if clip:
-                r = fitz.Rect(max(mb.x0, clip[0]), mb.y0, min(mb.x1, clip[2]), mb.y1)
-                page.set_cropbox(r)
-            pix = page.get_pixmap(dpi=96)
-            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
             doc.close()
 
             self.shapes = core.extract_layout(path, pno, clip)
@@ -239,123 +239,155 @@ class App:
                 bottom = (min(below) - 14) if below else (self.page_h - 40)
                 self.slots.append((b["x"] + 10, top, b["w"] - 20, bottom - top))
 
-            self.show_page(img)
-            self.info.delete("1.0", "end")
-            self.info.insert("end",
-                             "페이지 크기  %.1f x %.1f pt  (%.0f x %.0f mm)\n"
-                             % (self.page_w, self.page_h,
-                                self.page_w * 25.4 / 72, self.page_h * 25.4 / 72))
-            self.info.insert("end", "사각형 %d개\n직선 %d개\n원본 텍스트 %d개\n" % (n_r, n_l, n_t))
-            self.info.insert("end", "이미지 0개 (래스터화 없음)\n\n")
-            self.info.insert("end", "검출된 문제 슬롯 %d개\n" % len(self.slots))
-            self.info.insert("end", "\n도형은 전부 HWPX 네이티브 도형으로\n옮겨집니다. dpi를 고르는 단계가\n없습니다.")
-
-            self.slotbox.delete(0, "end")
-            for i, (x, y, w, h) in enumerate(self.slots):
-                self.slotbox.insert("end", "슬롯%d  x=%6.1f y=%6.1f  %5.1f x %5.1f" % (i, x, y, w, h))
+            self.info.config(text=(
+                "%.0f x %.0f mm   사각형 %d · 직선 %d · 원본텍스트 %d\n"
+                "이미지 0개 (래스터화 없음)   검출된 문제 슬롯 %d개"
+                % (self.page_w * 25.4 / 72, self.page_h * 25.4 / 72, n_r, n_l, n_t, len(self.slots))))
             self.slotsel["values"] = ["슬롯%d" % i for i in range(len(self.slots))]
             if self.slots:
                 self.slotsel.current(0)
-                self.sel.set(0)
+                self.sel = 0
                 self.editor.delete("1.0", "end")
                 self.editor.insert("1.0", self.texts.get(0, ""))
-
             self.say("분석 완료. 사각형 %d, 직선 %d, 원본텍스트 %d, 슬롯 %d개"
                      % (n_r, n_l, n_t, len(self.slots)))
             if not self.slots:
-                self.say("  슬롯이 안 잡혔습니다. 이 디자인은 헤더 바 크기 조건이 다릅니다.")
+                self.say("  슬롯이 안 잡혔습니다. 이 디자인은 헤더 바 조건이 다릅니다.")
+            self.redraw()
         except Exception:
             self.say(traceback.format_exc())
 
-    def show_page(self, img):
-        cw = max(self.canvas.winfo_width(), 700)
-        ch = max(self.canvas.winfo_height(), 800)
-        sc = min(cw / img.width, ch / img.height, 1.0)
-        disp = img.resize((int(img.width * sc), int(img.height * sc)), Image.LANCZOS)
-        self.page_img = ImageTk.PhotoImage(disp)
-        self.canvas.delete("all")
-        ox = (cw - disp.width) // 2
-        self.canvas.create_image(ox, 10, anchor="nw", image=self.page_img)
-        self.scale = disp.width / self.page_w
-        self.origin = (ox, 10)
-        self.draw_slots()
+    # ------------------------------------------------------------ 미리보기
+    def redraw(self):
+        cv = self.canvas
+        cv.delete("all")
+        cw = max(cv.winfo_width(), 200)
+        ch = max(cv.winfo_height(), 200)
+        m = 12
 
-    def draw_slots(self):
-        self.canvas.delete("slot")
-        ox, oy = self.origin
+        zoom = self.zoomsel.get() and self.slots and self.sel < len(self.slots)
+        if zoom:
+            # 편집 중인 슬롯만 크게. 헤더 바까지 보이게 위아래로 조금 넓힌다
+            sx, sy, sw, sh = self.slots[self.sel]
+            vx0, vy0 = max(sx - 14, 0), max(sy - 34, 0)
+            vx1, vy1 = min(sx + sw + 14, self.page_w), min(sy + sh + 14, self.page_h)
+            vw, vh = vx1 - vx0, vy1 - vy0
+            sc = min((cw - m * 2) / vw, (ch - m * 2) / vh)
+            ox = (cw - vw * sc) / 2 - vx0 * sc
+            oy = m - vy0 * sc
+        else:
+            sc = min((cw - m * 2) / self.page_w, (ch - m * 2) / self.page_h)
+            ox = (cw - self.page_w * sc) / 2
+            oy = m
+        if sc <= 0:
+            return
+        self.scale = sc
+        self.origin = (ox, oy)
+
+        def X(v): return ox + v * sc
+        def Y(v): return oy + v * sc
+
+        cv.create_rectangle(X(0), Y(0), X(self.page_w), Y(self.page_h),
+                            fill="white", outline="#b9b9c4")
+
+        # 원본 도형을 그대로 그린다. 이게 HWPX에 들어갈 것이다.
+        for s in self.shapes:
+            if s["k"] == "rect":
+                cv.create_rectangle(X(s["x"]), Y(s["y"]), X(s["x"] + s["w"]), Y(s["y"] + s["h"]),
+                                    fill=s["fill"] or "", outline=s["stroke"] or "",
+                                    width=max(s["lw"] * sc, 1) if s["stroke"] else 0)
+            elif s["k"] == "line":
+                col = s["stroke"] or "#000000"
+                cv.create_line(X(s["x1"]), Y(s["y1"]), X(s["x2"]), Y(s["y2"]),
+                               fill=col, width=max((s["lw"] or 0.5) * sc, 1))
+            else:
+                px = max(int(s["size"] * sc), 5)
+                cv.create_text(X(s["x"]), Y(s["y"] + s["h"]), text=s["s"], anchor="sw",
+                               font=("맑은 고딕", -px), fill=s.get("color") or "#000000")
+
+        # 슬롯 경계와 입력 내용
         for i, (x, y, w, h) in enumerate(self.slots):
-            X, Y = ox + x * self.scale, oy + y * self.scale
-            W, H = w * self.scale, h * self.scale
-            on = (i == self.sel.get())
-            self.canvas.create_rectangle(X, Y, X + W, Y + H,
-                                         outline="#d43f3a" if on else "#3a7bd4",
-                                         width=3 if on else 2,
-                                         dash=() if on else (5, 3), tags="slot")
-            filled = "●" if self.texts.get(i, "").strip() else "○"
-            self.canvas.create_text(X + 8, Y + 12, anchor="w",
-                                    text="%s 슬롯%d" % (filled, i),
-                                    fill="#d43f3a" if on else "#3a7bd4",
-                                    font=("맑은 고딕", 10, "bold"), tags="slot")
+            if self.showgrid.get():
+                on = (i == self.sel)
+                cv.create_rectangle(X(x), Y(y), X(x + w), Y(y + h),
+                                    outline="#d43f3a" if on else "#9db8dd",
+                                    width=2 if on else 1, dash=() if on else (4, 3))
+                # 라벨은 슬롯 밖 왼쪽 위에. 본문과 겹치면 읽기 어렵다
+                cv.create_text(X(x), Y(y) - 3, anchor="sw", text="슬롯%d" % i,
+                               fill="#d43f3a" if on else "#9db8dd",
+                               font=("맑은 고딕", -max(int(7 * sc * 1.5), 9), "bold"))
+            txt = self.texts.get(i, "").strip()
+            if txt:
+                px = max(int(10.5 * sc), 6)
+                end = pv.render_parts(cv, parse_markup(txt), X(x) + 4, Y(y) + 2,
+                                      w * sc - 8, px=px, tags=("body", "s%d" % i))
+                if end > Y(y + h):
+                    cv.create_rectangle(X(x), Y(y), X(x + w), Y(y + h),
+                                        outline="#e05a4f", width=2, dash=(2, 2))
+                    cv.create_text(X(x + w) - 4, Y(y + h) - 4, anchor="se",
+                                   text="넘침", fill="#e05a4f",
+                                   font=("맑은 고딕", -max(int(9 * sc * 1.6), 9), "bold"))
+
+        filled = sum(1 for v in self.texts.values() if v.strip())
+        self.status.config(text="%s %.0f%%   채운 슬롯 %d / %d"
+                                % ("슬롯%d 확대" % self.sel if zoom else "전체",
+                                   sc * 100, filled, len(self.slots)))
 
     def click_canvas(self, ev):
+        if not self.slots:
+            return
         ox, oy = self.origin
         for i, (x, y, w, h) in enumerate(self.slots):
-            X, Y = ox + x * self.scale, oy + y * self.scale
-            if X <= ev.x <= X + w * self.scale and Y <= ev.y <= Y + h * self.scale:
-                self.sel.set(i)
+            if (ox + x * self.scale <= ev.x <= ox + (x + w) * self.scale and
+                    oy + y * self.scale <= ev.y <= oy + (y + h) * self.scale):
+                self.sel = i
                 self.slotsel.current(i)
                 self.editor.delete("1.0", "end")
                 self.editor.insert("1.0", self.texts.get(i, ""))
-                self.draw_slots()
-                self.say("슬롯%d 선택" % i)
+                self.redraw()
                 return
 
-    def pick_slot(self, ev):
-        s = self.slotbox.curselection()
-        if s:
-            self.sel.set(s[0])
-            self.slotsel.current(s[0])
-            self.editor.delete("1.0", "end")
-            self.editor.insert("1.0", self.texts.get(s[0], ""))
-            self.draw_slots()
+    # ------------------------------------------------------------ 편집
+    def on_type(self, ev=None):
+        self.texts[self.sel] = self.editor.get("1.0", "end-1c")
+        if self._job:
+            self.root.after_cancel(self._job)
+        self._job = self.root.after(220, self.redraw)
 
-    # ------------------------------------------------------------ 2단계
     def switch_slot(self, ev=None):
-        i = self.slotsel.current()
-        self.sel.set(i)
+        self.sel = self.slotsel.current()
         self.editor.delete("1.0", "end")
-        self.editor.insert("1.0", self.texts.get(i, ""))
-        self.draw_slots()
-
-    def save_text(self, ev=None):
-        self.texts[self.sel.get()] = self.editor.get("1.0", "end-1c")
-        self.draw_slots()
+        self.editor.insert("1.0", self.texts.get(self.sel, ""))
+        self.redraw()
 
     def insert_eq(self, code):
         self.editor.insert("insert", "$%s$" % code)
-        self.save_text()
+        self.on_type()
 
     def fill_sample(self):
-        i = self.sel.get()
         self.editor.delete("1.0", "end")
-        self.editor.insert("1.0", SAMPLES[i % len(SAMPLES)])
-        self.save_text()
+        self.editor.insert("1.0", SAMPLES[self.sel % len(SAMPLES)])
+        self.on_type()
 
     def fill_all(self):
         for i in range(len(self.slots)):
             self.texts[i] = SAMPLES[i % len(SAMPLES)]
         self.editor.delete("1.0", "end")
-        self.editor.insert("1.0", self.texts.get(self.sel.get(), ""))
-        self.draw_slots()
-        self.say("슬롯 %d개에 예시 문제를 넣었습니다." % len(self.slots))
+        self.editor.insert("1.0", self.texts.get(self.sel, ""))
+        self.redraw()
+        self.say("슬롯 %d개에 예시를 넣었습니다." % len(self.slots))
 
-    # ------------------------------------------------------------ 3단계
+    def clear_slot(self):
+        self.texts[self.sel] = ""
+        self.editor.delete("1.0", "end")
+        self.redraw()
+
+    # ------------------------------------------------------------ 생성
     def build(self):
         try:
             if not self.slots:
                 messagebox.showwarning("", "먼저 레이아웃을 분석하세요.")
                 return
-            self.say("HWPX 조립 시작")
             xml, z = [], 0
             for s in self.shapes:
                 if s["k"] == "rect":
@@ -370,8 +402,6 @@ class App:
                     xml.append(core.rect_xml(s["x"] - 1, s["y"] - 2, s["w"] + 8, s["h"] + 6,
                                              fill=None, stroke=None, lw=0, z=z, inner=inner))
                 z += 1
-            self.say("  도형 %d개 변환" % z)
-
             n_eq = 0
             for i, (x, y, w, h) in enumerate(self.slots):
                 txt = self.texts.get(i, "").strip()
@@ -382,28 +412,25 @@ class App:
                 inner = core.paras_from_parts(parts, width_hu=core.hu(w))
                 xml.append(core.rect_xml(x, y, w, h, fill=None, stroke=None, lw=0, z=z, inner=inner))
                 z += 1
-                self.say("  슬롯%d 주입 (%d자, 수식 %d개)" % (i, len(txt), count_eq(parts)))
-            self.say("  수식 합계 %d개" % n_eq)
-
             section = core.build_section("".join(xml), self.page_w, self.page_h)
-            self.out_hwpx = os.path.join(OUTDIR, "실습결과.hwpx")
-            core.write_hwpx(core.template_path(), section, self.out_hwpx)
-            self.say("완료: %s (%.1f KB)" % (self.out_hwpx, os.path.getsize(self.out_hwpx) / 1024))
-            self.nb.select(2)
+            out = os.path.join(OUTDIR, "실습결과.hwpx")
+            core.write_hwpx(core.template_path(), section, out)
+            self.say("HWPX 저장: %s (%.1f KB, 도형 %d, 수식 %d)"
+                     % (out, os.path.getsize(out) / 1024, z, n_eq))
         except Exception:
             self.say(traceback.format_exc())
 
     def verify(self):
-        threading.Thread(target=self._verify_worker, daemon=True).start()
+        threading.Thread(target=self._verify, daemon=True).start()
 
-    def _verify_worker(self):
+    def _verify(self):
         try:
             src = os.path.join(OUTDIR, "실습결과.hwpx")
             if not os.path.exists(src):
                 self.say("먼저 HWPX를 만드세요.")
                 return
             pdf = os.path.join(OUTDIR, "실습결과_검증.pdf")
-            self.say("한글 기동 중")
+            self.say("한글 기동")
             import pythoncom
             import win32com.client.gencache as gencache
             pythoncom.CoInitialize()
@@ -413,92 +440,36 @@ class App:
             except Exception:
                 pass
             ok = hwp.Open(os.path.abspath(src), "HWPX", "")
-            self.say("  한글이 파일을 열었나: %s" % ok)
             txt = ""
             try:
                 txt = hwp.GetTextFile("TEXT", "")
             except Exception:
                 pass
-            self.say("  문서에서 추출한 텍스트 %d자 (이미지가 아니라는 증거)" % len(txt))
             if os.path.exists(pdf):
                 os.remove(pdf)
             hwp.SaveAs(os.path.abspath(pdf), "PDF", "")
-            hwp.Clear(1)
-            hwp.Quit()
+            hwp.Clear(1); hwp.Quit()
             pythoncom.CoUninitialize()
-
             d = fitz.open(pdf)
             p = d[0]
-            n_img = len(p.get_images())
-            n_vec = len(p.get_drawings())
-            n_txt = len(p.get_text("text").strip())
-            self.say("  내보낸 PDF: %.0f x %.0f mm, 벡터 %d, 이미지 %d, 텍스트 %d자"
-                     % (p.rect.width * 25.4 / 72, p.rect.height * 25.4 / 72, n_vec, n_img, n_txt))
-            pix = p.get_pixmap(dpi=96)
-            gen = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            self.say("열림 %s · 추출 텍스트 %d자 · 벡터 %d · 이미지 %d"
+                     % (ok, len(txt), len(p.get_drawings()), len(p.get_images())))
             d.close()
-
-            doc = fitz.open(self.pdf_path.get())
-            pg = doc[self.pageno.get() - 1]
-            clip = self.clip_of(pg)
-            mb = pg.mediabox
-            if clip:
-                pg.set_cropbox(fitz.Rect(max(mb.x0, clip[0]), mb.y0, min(mb.x1, clip[2]), mb.y1))
-            px = pg.get_pixmap(dpi=96)
-            org = Image.frombytes("RGB", (px.width, px.height), px.samples)
-            doc.close()
-
-            self.root.after(0, lambda: self.show_result(org, gen, n_img, n_txt))
-            self.say("확인 끝. 이미지 %d개, 텍스트 %d자." % (n_img, n_txt))
+            os.startfile(pdf)
         except Exception:
             self.say(traceback.format_exc())
 
-    def show_result(self, org, gen, n_img, n_txt):
-        c = self.result_canvas
-        c.delete("all")
-        cw = max(c.winfo_width(), 900)
-        ch = max(c.winfo_height(), 600)
-        sc = min((cw - 60) / (org.width + gen.width), (ch - 60) / max(org.height, gen.height))
-        a = org.resize((int(org.width * sc), int(org.height * sc)), Image.LANCZOS)
-        b = gen.resize((int(gen.width * sc), int(gen.height * sc)), Image.LANCZOS)
-        self.result_imgs = [ImageTk.PhotoImage(a), ImageTk.PhotoImage(b)]
-        c.create_text(20, 12, anchor="w", text="원본 (디자이너 PDF)",
-                      font=("맑은 고딕", 11, "bold"), fill="#333333")
-        c.create_image(20, 34, anchor="nw", image=self.result_imgs[0])
-        x2 = 40 + a.width
-        c.create_text(x2, 12, anchor="w", text="생성 (HWPX를 한글로 열어 내보낸 것)",
-                      font=("맑은 고딕", 11, "bold"), fill="#333333")
-        c.create_image(x2, 34, anchor="nw", image=self.result_imgs[1])
-        c.create_text(x2, 40 + b.height, anchor="nw",
-                      text="이미지 %d개 · 추출 텍스트 %d자" % (n_img, n_txt),
-                      font=("맑은 고딕", 10), fill="#0a7d32" if n_img == 0 else "#b33")
-
 
 def selftest():
-    """GUI 없이 파서만 검사한다."""
+    from preview import parse_script
     for i, s in enumerate(SAMPLES):
         p = parse_markup(s)
         print("샘플%d parts=%d 수식=%d" % (i, len(p), count_eq(p)))
         for q in p:
             if "eq" in q:
-                print("   eq:", q["eq"])
+                node = parse_script(q["eq"])
+                print("   파싱된 수식 노드 수:", len(node[1]))
     print("selftest OK")
-
-
-def shot(root, app, path):
-    """창을 맨 앞으로 올린 뒤 캡처한다. 문서용."""
-    from PIL import ImageGrab
-    import time
-    root.attributes("-topmost", True)
-    root.lift()
-    root.focus_force()
-    root.update()
-    time.sleep(0.6)
-    root.update()
-    x, y = root.winfo_rootx(), root.winfo_rooty()
-    w, h = root.winfo_width(), root.winfo_height()
-    ImageGrab.grab(bbox=(x, y, x + w, y + h), all_screens=True).save(path)
-    app.say("스크린샷 저장: %s" % os.path.basename(path))
 
 
 if __name__ == "__main__":
@@ -507,20 +478,23 @@ if __name__ == "__main__":
     else:
         root = tk.Tk()
         app = App(root)
+        if DEFAULT_PDF:
+            root.after(300, app.analyze)
         if "--demo" in sys.argv:
-            # 자동으로 1단계와 2단계를 밟고 화면을 캡처한 뒤 닫는다
             def run():
                 app.analyze()
-                shot(root, app, os.path.join(OUTDIR, "gui_1_분석.png"))
                 app.fill_all()
-                app.nb.select(1)
                 root.update()
-                shot(root, app, os.path.join(OUTDIR, "gui_2_문제입력.png"))
+                from PIL import ImageGrab
+                import time
+                root.attributes("-topmost", True); root.lift(); root.focus_force()
+                root.update(); time.sleep(0.7); root.update()
+                x, y = root.winfo_rootx(), root.winfo_rooty()
+                ImageGrab.grab(bbox=(x, y, x + root.winfo_width(), y + root.winfo_height()),
+                               all_screens=True).save(os.path.join(OUTDIR, "gui_미리보기.png"))
                 app.build()
-                root.update()
-                shot(root, app, os.path.join(OUTDIR, "gui_3_변환.png"))
                 with open(os.path.join(OUTDIR, "gui_demo_log.txt"), "w", encoding="utf-8") as f:
                     f.write(app.log.get("1.0", "end"))
-                root.after(800, root.destroy)
-            root.after(600, run)
+                root.after(600, root.destroy)
+            root.after(700, run)
         root.mainloop()
