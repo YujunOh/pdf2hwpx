@@ -27,10 +27,11 @@ import fitz
 from PIL import Image, ImageTk
 import pdf2hwpx as core
 
-OUTDIR = os.path.join(HERE, "out")
+OUTDIR = os.path.join(core.work_dir(), "out")
 os.makedirs(OUTDIR, exist_ok=True)
 
-DEFAULT_PDF = r"C:\Users\dbwns\OneDrive\문서\카카오톡 받은 파일\박진성 선생님 교재 5 (2).pdf"
+# exe에 PDF를 끌어다 놓거나 인자로 주면 그 파일로 시작한다
+DEFAULT_PDF = next((a for a in sys.argv[1:] if a.lower().endswith(".pdf")), "")
 
 SAMPLES = [
     "다음 식을 간단히 하시오.\n\n$(x+2y) ^{3} -(x-2y) ^{3}$\n\n"
@@ -385,12 +386,8 @@ class App:
             self.say("  수식 합계 %d개" % n_eq)
 
             section = core.build_section("".join(xml), self.page_w, self.page_h)
-            template = os.path.join(
-                r"C:\Users\dbwns\AppData\Local\Temp\claude\C--Users-dbwns"
-                r"\3518c5f8-e4ac-4813-b221-b03d83aef551\scratchpad\hwpx_base",
-                "SimpleRectangle.hwpx")
             self.out_hwpx = os.path.join(OUTDIR, "실습결과.hwpx")
-            core.write_hwpx(template, section, self.out_hwpx)
+            core.write_hwpx(core.template_path(), section, self.out_hwpx)
             self.say("완료: %s (%.1f KB)" % (self.out_hwpx, os.path.getsize(self.out_hwpx) / 1024))
             self.nb.select(2)
         except Exception:

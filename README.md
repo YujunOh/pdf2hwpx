@@ -35,10 +35,16 @@
 
 ## 실행
 
+파이썬 없이 쓰려면 [릴리스](https://github.com/YujunOh/pdf2hwpx/releases)에서 `pdf2hwpx.exe` 를 받아 더블클릭하면 됩니다. 레이아웃 PDF를 exe 위로 끌어다 놓으면 그 파일로 바로 시작합니다.
+
+소스로 돌리려면 `실행.bat` 를 더블클릭하거나 이렇게 합니다.
+
 ```bash
 pip install PyMuPDF pillow pywin32
 python gui.py
 ```
+
+직접 빌드하려면 `build.bat` 를 실행합니다. PyInstaller가 없으면 알아서 설치합니다.
 
 GUI가 세 단계로 되어 있다.
 

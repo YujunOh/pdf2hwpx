@@ -9,6 +9,25 @@
 """
 import fitz, json, os, re, shutil, sys, zipfile
 
+
+# ---------------------------------------------------------------- 경로
+def resource_path(*parts):
+    """번들 안의 읽기 전용 자원. PyInstaller로 묶어도 찾을 수 있다."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *parts)
+
+
+def work_dir():
+    """산출물을 쓸 곳. exe면 exe 옆, 스크립트면 소스 옆."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def template_path():
+    return resource_path("resources", "base.hwpx")
+
+
 # ---------------------------------------------------------------- 단위
 PT = 100                      # 1pt = 100 HWPUNIT (정확)
 MM = 283.465
@@ -300,12 +319,15 @@ def write_hwpx(template, section_xml, out_path):
 
 
 # ---------------------------------------------------------------- 5. 실행
-def main():
-    here = os.path.dirname(os.path.abspath(__file__))
-    scratch = r"C:\Users\dbwns\AppData\Local\Temp\claude\C--Users-dbwns\3518c5f8-e4ac-4813-b221-b03d83aef551\scratchpad"
-    SRC = r"C:\Users\dbwns\OneDrive\문서\카카오톡 받은 파일\박진성 선생님 교재 5 (2).pdf"
-    TEMPLATE = os.path.join(scratch, "hwpx_base", "SimpleRectangle.hwpx")
-    OUT = os.path.join(here, "out", "교재5p3_문제채움.hwpx")
+def main(src=None):
+    here = work_dir()
+    SRC = src or (sys.argv[1] if len(sys.argv) > 1 else None)
+    if not SRC:
+        print("사용법: python pdf2hwpx.py <레이아웃PDF경로>")
+        print("GUI로 쓰려면 python gui.py")
+        return None
+    TEMPLATE = template_path()
+    OUT = os.path.join(here, "out", "문제채움.hwpx")
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
 
     # 교재5 3쪽 우면(문제 4개 그리드). A3 스프레드의 오른쪽 절반.
