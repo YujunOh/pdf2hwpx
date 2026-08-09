@@ -24,6 +24,7 @@ sys.path.insert(0, HERE)
 import fitz
 import pdf2hwpx as core
 import preview as pv
+import manuscript as ms
 
 OUTDIR = os.path.join(core.work_dir(), "out")
 os.makedirs(OUTDIR, exist_ok=True)
@@ -89,6 +90,9 @@ class App:
         self.sel = 0
         self.page_w, self.page_h = 595.276, 841.89
         self._job = None
+        self._drag = None
+        self._rubber = None
+        self.problems = []
         self.result_imgs = []
         self._build()
 
@@ -114,7 +118,10 @@ class App:
         pane.add(lf, weight=3)
         self.canvas = tk.Canvas(lf, bg="#e9e9ee", highlightthickness=0, width=560)
         self.canvas.pack(fill="both", expand=True)
-        self.canvas.bind("<Button-1>", self.click_canvas)
+        self.canvas.bind("<Button-1>", self.on_press)
+        self.canvas.bind("<B1-Motion>", self.on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_release)
+        self.canvas.bind("<Button-3>", self.on_rclick)
         self.canvas.bind("<Configure>", lambda e: self.redraw())
         bar = ttk.Frame(lf)
         bar.pack(fill="x", pady=(4, 0))
@@ -134,6 +141,18 @@ class App:
         self.info = ttk.Label(box, text="PDF를 고르고 레이아웃 분석을 누르세요.",
                               justify="left", foreground="#333333")
         self.info.pack(anchor="w")
+
+        mf = ttk.LabelFrame(rf, text="선생님 원고", padding=6)
+        mf.pack(fill="x", pady=(6, 0))
+        mrow = ttk.Frame(mf)
+        mrow.pack(fill="x")
+        ttk.Button(mrow, text="원고 불러오기", command=self.load_manuscript).pack(side="left")
+        ttk.Button(mrow, text="순서대로 채우기", command=self.autofill).pack(side="left", padx=6)
+        self.mlabel = ttk.Label(mrow, text="hwp, hwpx, txt", foreground="#777777")
+        self.mlabel.pack(side="left")
+        self.problist = tk.Listbox(mf, height=5, font=("맑은 고딕", 9))
+        self.problist.pack(fill="x", pady=(6, 0))
+        self.problist.bind("<Double-Button-1>", self.put_problem)
 
         sf = ttk.LabelFrame(rf, text="문제 입력", padding=6)
         sf.pack(fill="both", expand=True, pady=6)
@@ -235,7 +254,7 @@ class App:
                 "%.0f x %.0f mm   사각형 %d · 직선 %d · 원본텍스트 %d\n"
                 "이미지 0개 (래스터화 없음)   검출된 문제 슬롯 %d개"
                 % (self.page_w * 25.4 / 72, self.page_h * 25.4 / 72, n_r, n_l, n_t, len(self.slots))))
-            self.slotsel["values"] = ["슬롯%d" % i for i in range(len(self.slots))]
+            self.reindex()
             if self.slots:
                 self.slotsel.current(0)
                 self.sel = 0
@@ -388,24 +407,146 @@ class App:
                                    text="넘침", fill="#e05a4f",
                                    font=("맑은 고딕", -max(int(9 * sc * 1.6), 9), "bold"))
 
+        if self._rubber:
+            rx, ry, rw, rh = self._rubber
+            cv.create_rectangle(X(rx), Y(ry), X(rx + rw), Y(ry + rh),
+                                outline="#d43f3a", width=2, dash=(3, 2))
+
         filled = sum(1 for v in self.texts.values() if v.strip())
         self.status.config(text="%s %.0f%%   채운 슬롯 %d / %d"
                                 % ("슬롯%d 확대" % self.sel if zoom else "전체",
                                    sc * 100, filled, len(self.slots)))
 
-    def click_canvas(self, ev):
-        if not self.slots:
-            return
+    # ------------------------------------------------------------ 슬롯 손질
+    def to_pt(self, ex, ey):
         ox, oy = self.origin
-        for i, (x, y, w, h) in enumerate(self.slots):
-            if (ox + x * self.scale <= ev.x <= ox + (x + w) * self.scale and
-                    oy + y * self.scale <= ev.y <= oy + (y + h) * self.scale):
-                self.sel = i
-                self.slotsel.current(i)
-                self.editor.delete("1.0", "end")
-                self.editor.insert("1.0", self.texts.get(i, ""))
-                self.redraw()
-                return
+        return (ex - ox) / self.scale, (ey - oy) / self.scale
+
+    def hit(self, px, py):
+        """점이 어느 슬롯 위인지. 우하단 모서리면 크기 조절로 본다."""
+        for i in reversed(range(len(self.slots))):
+            x, y, w, h = self.slots[i]
+            if x <= px <= x + w and y <= py <= y + h:
+                grip = 14 / max(self.scale, 0.01)
+                if px > x + w - grip and py > y + h - grip:
+                    return i, "resize"
+                return i, "move"
+        return None, None
+
+    def select(self, i):
+        self.sel = i
+        if 0 <= i < len(self.slots):
+            self.slotsel.current(i)
+        self.editor.delete("1.0", "end")
+        self.editor.insert("1.0", self.texts.get(i, ""))
+
+    def on_press(self, ev):
+        px, py = self.to_pt(ev.x, ev.y)
+        i, mode = self.hit(px, py)
+        if i is None:
+            self._drag = {"mode": "new", "sx": px, "sy": py}
+        else:
+            self.select(i)
+            self._drag = {"mode": mode, "sx": px, "sy": py, "orig": self.slots[i]}
+        self.redraw()
+
+    def on_drag(self, ev):
+        d = getattr(self, "_drag", None)
+        if not d:
+            return
+        px, py = self.to_pt(ev.x, ev.y)
+        if d["mode"] == "new":
+            self._rubber = (min(d["sx"], px), min(d["sy"], py),
+                            abs(px - d["sx"]), abs(py - d["sy"]))
+        elif d["mode"] == "move":
+            x, y, w, h = d["orig"]
+            self.slots[self.sel] = (x + px - d["sx"], y + py - d["sy"], w, h)
+        elif d["mode"] == "resize":
+            x, y, w, h = d["orig"]
+            self.slots[self.sel] = (x, y, max(w + px - d["sx"], 30), max(h + py - d["sy"], 24))
+        self.redraw()
+
+    def on_release(self, ev):
+        d = getattr(self, "_drag", None)
+        self._drag = None
+        rub = getattr(self, "_rubber", None)
+        self._rubber = None
+        if d and d["mode"] == "new" and rub and rub[2] > 25 and rub[3] > 20:
+            self.slots.append(rub)
+            self.reindex()
+            self.select(len(self.slots) - 1)
+            self.say("슬롯%d 추가 (%.0f x %.0f pt)" % (self.sel, rub[2], rub[3]))
+        self.redraw()
+
+    def on_rclick(self, ev):
+        px, py = self.to_pt(ev.x, ev.y)
+        i, _ = self.hit(px, py)
+        if i is None:
+            return
+        if not messagebox.askyesno("", "슬롯%d 를 지울까요?" % i):
+            return
+        self.slots.pop(i)
+        self.texts.pop(i, None)
+        for k in sorted([k for k in self.texts if k > i]):
+            self.texts[k - 1] = self.texts.pop(k)
+        self.reindex()
+        self.select(min(i, len(self.slots) - 1) if self.slots else 0)
+        self.say("슬롯%d 삭제" % i)
+        self.redraw()
+
+    def reindex(self):
+        self.slotsel["values"] = ["슬롯%d" % i for i in range(len(self.slots))]
+
+    # ------------------------------------------------------------ 원고
+    def load_manuscript(self):
+        p = filedialog.askopenfilename(
+            title="선생님 원고를 고르세요",
+            filetypes=[("원고", "*.hwp *.hwpx *.txt"), ("모든 파일", "*.*")])
+        if not p:
+            return
+        try:
+            self.problems = ms.load(p)
+        except Exception:
+            self.say(traceback.format_exc())
+            messagebox.showerror("", "원고를 읽지 못했습니다. 로그를 보세요.")
+            return
+        self.problist.delete(0, "end")
+        n_eq = 0
+        for i, pr in enumerate(self.problems):
+            t = ms.parts_to_markup(pr["parts"]).replace("\n", " ")
+            n_eq += sum(1 for q in pr["parts"] if "eq" in q)
+            self.problist.insert("end", "%s. %s" % (pr["no"] or (i + 1), t[:70]))
+        self.mlabel.config(text="%s  문항 %d개, 수식 %d개"
+                                % (os.path.basename(p), len(self.problems), n_eq))
+        self.say("원고 읽음: %s (문항 %d, 수식 %d). 목록을 두 번 누르면 선택한 슬롯에 들어갑니다."
+                 % (os.path.basename(p), len(self.problems), n_eq))
+
+    def put_problem(self, ev=None):
+        s = self.problist.curselection()
+        if not s or not self.slots:
+            return
+        pr = self.problems[s[0]]
+        self.texts[self.sel] = ms.parts_to_markup(pr["parts"])
+        self.editor.delete("1.0", "end")
+        self.editor.insert("1.0", self.texts[self.sel])
+        self.redraw()
+        self.say("문항 %s 를 슬롯%d 에 넣었습니다." % (pr["no"] or s[0] + 1, self.sel))
+
+    def autofill(self):
+        if not getattr(self, "problems", None):
+            messagebox.showwarning("", "먼저 원고를 불러오세요.")
+            return
+        if not self.slots:
+            messagebox.showwarning("", "먼저 레이아웃을 분석하세요.")
+            return
+        n = min(len(self.problems), len(self.slots))
+        for i in range(n):
+            self.texts[i] = ms.parts_to_markup(self.problems[i]["parts"])
+        self.editor.delete("1.0", "end")
+        self.editor.insert("1.0", self.texts.get(self.sel, ""))
+        self.redraw()
+        self.say("문항 %d개를 슬롯에 채웠습니다. 남은 문항 %d개."
+                 % (n, len(self.problems) - n))
 
     # ------------------------------------------------------------ 편집
     def on_type(self, ev=None):
