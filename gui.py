@@ -300,6 +300,18 @@ class App:
                 col = s["stroke"] or "#000000"
                 cv.create_line(X(s["x1"]), Y(s["y1"]), X(s["x2"]), Y(s["y2"]),
                                fill=col, width=max((s["lw"] or 0.5) * sc, 1))
+            elif s["k"] == "curve":
+                flat = []
+                for px, py in s["pts"]:
+                    flat += [X(px), Y(py)]
+                if len(flat) >= 4:
+                    if s["fill"]:
+                        cv.create_polygon(flat, fill=s["fill"],
+                                          outline=s["stroke"] or "",
+                                          width=max((s["lw"] or 0) * sc, 1) if s["stroke"] else 0)
+                    else:
+                        cv.create_line(flat, fill=s["stroke"] or "#000000",
+                                       width=max((s["lw"] or 0.5) * sc, 1))
             else:
                 px = max(int(s["size"] * sc), 5)
                 cv.create_text(X(s["x"]), Y(s["y"] + s["h"]), text=s["s"], anchor="sw",
@@ -400,6 +412,9 @@ class App:
                     xml.append(core.line_xml(s["x1"], s["y1"], s["x2"], s["y2"],
                                              stroke=s["stroke"] or "#000000",
                                              lw=s["lw"] or 0.5, z=z))
+                elif s["k"] == "curve":
+                    xml.append(core.curve_xml(s["pts"], fill=s["fill"], stroke=s["stroke"],
+                                              lw=s["lw"], close=s.get("close", False), z=z))
                 else:
                     # 원본 글자의 폰트, 크기, 색을 그대로 재현한다
                     cp = table.from_span(s.get("font", ""), s["size"],

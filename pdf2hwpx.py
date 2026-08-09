@@ -61,6 +61,16 @@ def extract_layout(pdf_path, pageno, clip=None):
         fill = rgb(g.get("fill"))
         stroke = rgb(g.get("color"))
         lw = g.get("width") or 0
+        # 곡선이 섞인 path는 통째로 curve로 옮긴다. 쪼개면 모양이 무너진다.
+        if any(it[0] == "c" for it in g["items"]):
+            r = g["rect"]
+            if clip and not inside(r.x0, r.x1):
+                continue
+            pts = [(px - ox, py - oy) for px, py in flatten_path(g["items"])]
+            if len(pts) >= 2:
+                out.append({"k": "curve", "pts": pts, "fill": fill, "stroke": stroke,
+                            "lw": lw, "close": bool(g.get("closePath"))})
+            continue
         for it in g["items"]:
             if it[0] == "re":
                 q = it[1]
@@ -76,7 +86,6 @@ def extract_layout(pdf_path, pageno, clip=None):
                 out.append({"k": "line", "x1": p1.x - ox, "y1": p1.y - oy,
                             "x2": p2.x - ox, "y2": p2.y - oy,
                             "stroke": stroke or fill, "lw": lw})
-            # 'c'(베지어)는 이번 대상 페이지에 없다. 있으면 LINE 근사가 필요하다.
 
     # 원본에 박혀 있던 텍스트(문제번호 등)도 그대로 옮긴다
     for blk in page.get_text("dict")["blocks"]:
@@ -169,6 +178,66 @@ def rect_xml(x, y, w, h, fill=None, stroke=None, lw=0, ratio=0, z=0, inner=None)
         % (_nid(), z, _nid(), ratio, _common_head(W, H),
            _line_shape(stroke, lw), _fill(fill), drawtext,
            W, W, H, H, W, H, _pos(x, y)))
+
+
+def flatten_path(items, steps=12):
+    """PDF path를 점 목록으로 편다. 3차 베지어는 직선으로 쪼갠다.
+    HWPX의 <hp:seg>에는 제어점이 없어서 근사가 불가피하다."""
+    pts = []
+
+    def push(p):
+        if not pts or abs(pts[-1][0] - p[0]) > 0.01 or abs(pts[-1][1] - p[1]) > 0.01:
+            pts.append((p[0], p[1]))
+
+    for it in items:
+        if it[0] == "l":
+            push((it[1].x, it[1].y)); push((it[2].x, it[2].y))
+        elif it[0] == "c":
+            p0, p1, p2, p3 = it[1], it[2], it[3], it[4]
+            push((p0.x, p0.y))
+            for s in range(1, steps + 1):
+                t = s / float(steps)
+                u = 1.0 - t
+                a, b, c, d = u * u * u, 3 * u * u * t, 3 * u * t * t, t * t * t
+                push((a * p0.x + b * p1.x + c * p2.x + d * p3.x,
+                      a * p0.y + b * p1.y + c * p2.y + d * p3.y))
+        elif it[0] == "re":
+            r = it[1]
+            for p in ((r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1), (r.x0, r.y0)):
+                push(p)
+        elif it[0] == "qu":
+            q = it[1]
+            for p in (q.ul, q.ur, q.lr, q.ll, q.ul):
+                push((p.x, p.y))
+    return pts
+
+
+def curve_xml(pts, fill=None, stroke=None, lw=0, close=False, z=0):
+    """점 목록을 <hp:curve>로. 세그먼트는 전부 LINE이다."""
+    if len(pts) < 2:
+        return ""
+    p = list(pts)
+    if close and (abs(p[0][0] - p[-1][0]) > 0.01 or abs(p[0][1] - p[-1][1]) > 0.01):
+        p.append(p[0])
+    xs = [q[0] for q in p]
+    ys = [q[1] for q in p]
+    x0, y0 = min(xs), min(ys)
+    W, H = max(hu(max(xs) - x0), 1), max(hu(max(ys) - y0), 1)
+    segs = []
+    for i in range(len(p) - 1):
+        segs.append('<hp:seg type="LINE" x1="%d" y1="%d" x2="%d" y2="%d"/>'
+                    % (hu(p[i][0] - x0), hu(p[i][1] - y0),
+                       hu(p[i + 1][0] - x0), hu(p[i + 1][1] - y0)))
+    return (
+        '<hp:curve id="%d" zOrder="%d" numberingType="PICTURE" textWrap="IN_FRONT_OF_TEXT"'
+        ' textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0"'
+        ' instid="%d">%s%s%s'
+        '<hp:shadow type="NONE" color="#B2B2B2" offsetX="0" offsetY="0" alpha="0"/>%s'
+        '<hp:sz width="%d" widthRelTo="ABSOLUTE" height="%d" heightRelTo="ABSOLUTE" protect="0"/>'
+        '%s<hp:outMargin left="0" right="0" top="0" bottom="0"/>'
+        '<hp:shapeComment>곡선입니다.</hp:shapeComment></hp:curve>'
+        % (_nid(), z, _nid(), _common_head(W, H),
+           _line_shape(stroke, lw), _fill(fill), "".join(segs), W, H, _pos(x0, y0)))
 
 
 def line_xml(x1, y1, x2, y2, stroke="#000000", lw=0.5, z=0):
