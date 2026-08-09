@@ -6,7 +6,7 @@
 
 본 제품은 한글과컴퓨터의 한글 문서 파일(.hwp) 공개 문서를 참고하여 개발하였습니다.
 """
-import os, re, sys, threading, traceback
+import json, os, re, sys, threading, traceback
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -53,6 +53,61 @@ EQ_PALETTE = [
 ]
 
 
+# 한글에서 손이 이미 익은 키를 그대로 쓴다. keys.json으로 바꿀 수 있다.
+DEFAULT_KEYS = {
+    "save": "<Control-s>",
+    "open": "<Control-o>",
+    "manuscript": "<Control-Shift-O>",
+    "analyze": "<F5>",
+    "build": "<Control-b>",
+    "verify": "<F12>",
+    "next_slot": "<Control-Return>",
+    "prev_slot": "<Control-Shift-Return>",
+    "circled": "<Alt-i>",
+    "equation": "<Control-m>",
+    "zoom": "<F2>",
+    "toggle_log": "<F9>",
+}
+
+KEY_HELP = {
+    "save": "작업 저장", "open": "작업 열기", "manuscript": "원고 불러오기",
+    "analyze": "레이아웃 분석", "build": "HWPX 만들기", "verify": "한글로 확인",
+    "next_slot": "다음 슬롯", "prev_slot": "이전 슬롯",
+    "circled": "원문자 순환 (3 누르고 눌러 ③)", "equation": "수식 넣기",
+    "zoom": "확대 토글", "toggle_log": "로그 접기",
+}
+
+
+def load_keys():
+    """exe 옆 keys.json을 읽는다. 없으면 기본값으로 하나 만들어 둔다."""
+    path = os.path.join(core.work_dir(), "keys.json")
+    keys = dict(DEFAULT_KEYS)
+    try:
+        if os.path.exists(path):
+            keys.update(json.load(open(path, encoding="utf-8")))
+        else:
+            json.dump(DEFAULT_KEYS, open(path, "w", encoding="utf-8"),
+                      ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    return keys, path
+
+
+def next_circled(ch):
+    """3 을 ③ 으로, ③ 을 ⑶ 으로, ⑶ 을 다시 3 으로. 한글 상용구 순환과 같은 방식."""
+    if len(ch) != 1:
+        return ch
+    if ch in "0123456789":            # ①도 isdigit이 참이라 아스키만 본다
+        n = int(ch)
+        return chr(0x2460 + n - 1) if 1 <= n <= 20 else ch
+    o = ord(ch)
+    if 0x2460 <= o <= 0x2473:          # ① ~ ⑳
+        return chr(0x2474 + o - 0x2460)
+    if 0x2474 <= o <= 0x2487:          # ⑴ ~ ⒇
+        return str(o - 0x2474 + 1)
+    return ch
+
+
 def parse_markup(text):
     """달러 기호 사이는 수식, 줄바꿈은 br."""
     parts = []
@@ -93,6 +148,10 @@ class App:
         self._drag = None
         self._rubber = None
         self.problems = []
+        self.ms_path = ""
+        self.proj_path = ""
+        self.log_shown = True
+        self.keys, self.keys_path = load_keys()
         self.result_imgs = []
         self._build()
 
@@ -108,6 +167,8 @@ class App:
         ttk.Combobox(top, textvariable=self.side, values=["전체", "좌면", "우면"],
                      width=5, state="readonly").pack(side="left", padx=4)
         ttk.Button(top, text="레이아웃 분석", command=self.analyze).pack(side="left", padx=(8, 0))
+        ttk.Button(top, text="열기", width=5, command=self.open_project).pack(side="left", padx=(10, 2))
+        ttk.Button(top, text="저장", width=5, command=self.save_project).pack(side="left")
 
         pane = ttk.PanedWindow(self.root, orient="horizontal")
         pane.pack(fill="both", expand=True, padx=8, pady=4)
@@ -190,7 +251,9 @@ class App:
         self.log = tk.Text(self.root, height=6, font=("Consolas", 9),
                            bg="#1e1e1e", fg="#d4d4d4")
         self.log.pack(fill="x", padx=8, pady=(0, 8))
-        self.say("준비됨.")
+        self.bind_keys()
+        self.say("준비됨.  F5 분석 · Ctrl+B 만들기 · Ctrl+S 저장 · Alt+I 원문자 순환 · F9 로그 접기")
+        self.say("단축키는 %s 를 고치면 바뀝니다." % self.keys_path)
         # 미리보기가 절반 넘게 차지하도록 초기 분할 위치를 잡는다
         self.root.after(120, self._place_sash)
 
@@ -497,6 +560,122 @@ class App:
     def reindex(self):
         self.slotsel["values"] = ["슬롯%d" % i for i in range(len(self.slots))]
 
+    # ------------------------------------------------------------ 저장과 단축키
+    def bind_keys(self):
+        for name, seq in self.keys.items():
+            fn = getattr(self, "key_" + name, None)
+            if not fn or not seq:
+                continue
+            try:
+                self.root.bind_all(seq, fn)
+            except Exception:
+                self.say("단축키를 걸지 못했습니다: %s = %s" % (name, seq))
+
+    def key_save(self, ev=None):
+        self.save_project(); return "break"
+
+    def key_open(self, ev=None):
+        self.open_project(); return "break"
+
+    def key_manuscript(self, ev=None):
+        self.load_manuscript(); return "break"
+
+    def key_analyze(self, ev=None):
+        self.analyze(); return "break"
+
+    def key_build(self, ev=None):
+        self.build(); return "break"
+
+    def key_verify(self, ev=None):
+        self.verify(); return "break"
+
+    def key_zoom(self, ev=None):
+        self.zoomsel.set(not self.zoomsel.get()); self.redraw(); return "break"
+
+    def key_toggle_log(self, ev=None):
+        self.log_shown = not getattr(self, "log_shown", True)
+        if self.log_shown:
+            self.log.pack(fill="x", padx=8, pady=(0, 8))
+        else:
+            self.log.pack_forget()
+        return "break"
+
+    def key_next_slot(self, ev=None):
+        if self.slots:
+            self.select((self.sel + 1) % len(self.slots)); self.redraw()
+        return "break"
+
+    def key_prev_slot(self, ev=None):
+        if self.slots:
+            self.select((self.sel - 1) % len(self.slots)); self.redraw()
+        return "break"
+
+    def key_equation(self, ev=None):
+        self.editor.insert("insert", "$$")
+        self.editor.mark_set("insert", "insert-1c")
+        self.on_type()
+        return "break"
+
+    def key_circled(self, ev=None):
+        """커서 앞 한 글자를 다음 형태로 바꾼다. 한글 상용구 순환과 같다."""
+        try:
+            ch = self.editor.get("insert-1c", "insert")
+        except Exception:
+            return "break"
+        if not ch:
+            return "break"
+        nx = next_circled(ch)
+        if nx != ch:
+            self.editor.delete("insert-1c", "insert")
+            self.editor.insert("insert", nx)
+            self.on_type()
+        return "break"
+
+    def project_data(self):
+        return {
+            "pdf": self.pdf_path.get(), "page": self.pageno.get(), "side": self.side.get(),
+            "slots": [list(s) for s in self.slots],
+            "texts": {str(k): v for k, v in self.texts.items()},
+            "manuscript": getattr(self, "ms_path", ""),
+        }
+
+    def save_project(self):
+        p = filedialog.asksaveasfilename(
+            title="작업 저장", defaultextension=".dhp",
+            initialdir=OUTDIR, filetypes=[("조판 작업", "*.dhp")])
+        if not p:
+            return
+        json.dump(self.project_data(), open(p, "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=2)
+        self.proj_path = p
+        self.say("작업 저장: %s" % p)
+
+    def open_project(self):
+        p = filedialog.askopenfilename(title="작업 열기", initialdir=OUTDIR,
+                                       filetypes=[("조판 작업", "*.dhp")])
+        if not p:
+            return
+        try:
+            d = json.load(open(p, encoding="utf-8"))
+        except Exception:
+            self.say(traceback.format_exc()); return
+        self.pdf_path.set(d.get("pdf", ""))
+        self.pageno.set(d.get("page", 1))
+        self.side.set(d.get("side", "전체"))
+        if os.path.exists(self.pdf_path.get()):
+            self.analyze()
+        self.slots = [tuple(s) for s in d.get("slots", [])] or self.slots
+        self.texts = {int(k): v for k, v in d.get("texts", {}).items()}
+        self.reindex()
+        mp = d.get("manuscript", "")
+        if mp and os.path.exists(mp):
+            self._read_manuscript(mp)
+        self.select(0)
+        self.redraw()
+        self.proj_path = p
+        self.say("작업 열기: %s (슬롯 %d, 채운 칸 %d)"
+                 % (p, len(self.slots), sum(1 for v in self.texts.values() if v.strip())))
+
     # ------------------------------------------------------------ 원고
     def load_manuscript(self):
         p = filedialog.askopenfilename(
@@ -504,12 +683,16 @@ class App:
             filetypes=[("원고", "*.hwp *.hwpx *.txt"), ("모든 파일", "*.*")])
         if not p:
             return
+        self._read_manuscript(p)
+
+    def _read_manuscript(self, p):
         try:
             self.problems = ms.load(p)
         except Exception:
             self.say(traceback.format_exc())
             messagebox.showerror("", "원고를 읽지 못했습니다. 로그를 보세요.")
             return
+        self.ms_path = p
         self.problist.delete(0, "end")
         n_eq = 0
         for i, pr in enumerate(self.problems):

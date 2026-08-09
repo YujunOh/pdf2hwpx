@@ -185,9 +185,13 @@ def to_parts(paras):
     return parts
 
 
-def split_problems(paras):
-    """문단을 문항 단위로 자른다. 번호와 마침표와 탭으로 시작하는 문단이 경계다."""
+def split_problems(paras, drop_preamble=True):
+    """문단을 문항 단위로 자른다. 번호와 마침표와 탭으로 시작하는 문단이 경계다.
+
+    drop_preamble이면 첫 번호를 만나기 전 문단은 버린다. 표지나 머리말이
+    1번 문항에 통째로 딸려 들어가는 것을 막는다."""
     groups, cur, no = [], [], None
+    seen_number = False
     for p in paras:
         t = p.get("text", "")
         m = NUM_HEAD.match(t)
@@ -196,9 +200,12 @@ def split_problems(paras):
                 groups.append((no, cur))
             cur = [p]
             no = m.group(1)
+            seen_number = True
         elif cur:
             cur.append(p)
         elif t.strip():
+            if drop_preamble and not seen_number:
+                continue          # 첫 번호 앞은 표지나 머리말이다
             cur = [p]
             no = None
     if cur:
