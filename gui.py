@@ -344,18 +344,22 @@ class App:
             n_l = sum(1 for s in self.shapes if s["k"] == "line")
             n_t = sum(1 for s in self.shapes if s["k"] == "text")
 
+            key = (path, pno, self.side.get())
+            changed = getattr(self, "_target", None) not in (None, key)
+            self._target = key
             self.slots = self.detect_slots()
+            dropped = self.sync_slots(clear=changed)
+            if dropped:
+                self.say("  다른 쪽이라 입력해둔 글 %d개를 비웠습니다." % dropped
+                         if changed else
+                         "  칸이 줄어 넘치는 글 %d개를 버렸습니다." % dropped)
 
             self.info.config(text=(
                 "%.0f x %.0f mm   사각형 %d · 직선 %d · 원본텍스트 %d\n"
                 "이미지 0개 (래스터화 없음)   검출된 문제 슬롯 %d개"
                 % (self.page_w * 25.4 / 72, self.page_h * 25.4 / 72, n_r, n_l, n_t, len(self.slots))))
-            self.reindex()
-            if self.slots:
-                self.slotsel.current(0)
-                self.sel = 0
-                self.editor.delete("1.0", "end")
-                self.editor.insert("1.0", self.texts.get(0, ""))
+            self.editor.delete("1.0", "end")
+            self.editor.insert("1.0", self.texts.get(self.sel, ""))
             self.say("분석 완료. 사각형 %d, 직선 %d, 원본텍스트 %d, 슬롯 %d개"
                      % (n_r, n_l, n_t, len(self.slots)))
             if not self.slots:
@@ -514,15 +518,18 @@ class App:
             cv.create_rectangle(X(rx), Y(ry), X(rx + rw), Y(ry + rh),
                                 outline="#d43f3a", width=2, dash=(3, 2))
 
-        filled = sum(1 for v in self.texts.values() if v.strip())
+        filled = sum(1 for k, v in self.texts.items()
+                     if k < len(self.slots) and v.strip())
         self.status.config(text="%s %.0f%%   채운 슬롯 %d / %d"
                                 % ("슬롯%d 확대" % self.sel if zoom else "전체",
                                    sc * 100, filled, len(self.slots)))
 
     # ------------------------------------------------------------ 슬롯 손질
-    def to_pt(self, ex, ey):
-        ox, oy = self.origin
-        return (ex - ox) / self.scale, (ey - oy) / self.scale
+    def to_pt(self, ex, ey, frozen=None):
+        """확대 모드에서는 뷰 원점이 고른 칸을 따라간다. 드래그 중에는
+        시작 시점 좌표계로 계산해야 커서보다 멀리 날아가지 않는다."""
+        ox, oy, sc = frozen if frozen else (self.origin[0], self.origin[1], self.scale)
+        return (ex - ox) / sc, (ey - oy) / sc
 
     def hit(self, px, py):
         """점이 어느 슬롯 위인지. 우하단 모서리면 크기 조절로 본다."""
@@ -543,20 +550,24 @@ class App:
         self.editor.insert("1.0", self.texts.get(i, ""))
 
     def on_press(self, ev):
+        if not hasattr(self, "origin"):
+            return
         px, py = self.to_pt(ev.x, ev.y)
         i, mode = self.hit(px, py)
         if i is None:
-            self._drag = {"mode": "new", "sx": px, "sy": py}
+            self._drag = {"mode": "new", "sx": px, "sy": py,
+                          "fz": (self.origin[0], self.origin[1], self.scale)}
         else:
             self.select(i)
-            self._drag = {"mode": mode, "sx": px, "sy": py, "orig": self.slots[i]}
+            self._drag = {"mode": mode, "sx": px, "sy": py, "orig": self.slots[i],
+                          "fz": (self.origin[0], self.origin[1], self.scale)}
         self.redraw()
 
     def on_drag(self, ev):
         d = getattr(self, "_drag", None)
         if not d:
             return
-        px, py = self.to_pt(ev.x, ev.y)
+        px, py = self.to_pt(ev.x, ev.y, d.get("fz"))
         if d["mode"] == "new":
             self._rubber = (min(d["sx"], px), min(d["sy"], py),
                             abs(px - d["sx"]), abs(py - d["sy"]))
@@ -575,12 +586,15 @@ class App:
         self._rubber = None
         if d and d["mode"] == "new" and rub and rub[2] > 25 and rub[3] > 20:
             self.slots.append(rub)
+            self.texts.pop(len(self.slots) - 1, None)   # 옛 글을 물려받지 않게
             self.reindex()
             self.select(len(self.slots) - 1)
             self.say("슬롯%d 추가 (%.0f x %.0f pt)" % (self.sel, rub[2], rub[3]))
         self.redraw()
 
     def on_rclick(self, ev):
+        if not hasattr(self, "origin"):
+            return
         px, py = self.to_pt(ev.x, ev.y)
         i, _ = self.hit(px, py)
         if i is None:
@@ -591,13 +605,33 @@ class App:
         self.texts.pop(i, None)
         for k in sorted([k for k in self.texts if k > i]):
             self.texts[k - 1] = self.texts.pop(k)
-        self.reindex()
-        self.select(min(i, len(self.slots) - 1) if self.slots else 0)
+        self.sync_slots()
+        self.select(self.sel)
         self.say("슬롯%d 삭제" % i)
         self.redraw()
 
     def reindex(self):
         self.slotsel["values"] = ["슬롯%d" % i for i in range(len(self.slots))]
+
+    def sync_slots(self, clear=False):
+        """슬롯 개수가 바뀌면 남는 글과 선택 위치를 정리한다.
+        texts 키가 위치 인덱스라 정리하지 않으면 글이 엉뚱한 칸으로 밀린다."""
+        n = len(self.slots)
+        if clear:
+            dropped = len(self.texts)
+            self.texts.clear()
+        else:
+            over = [k for k in self.texts if k >= n]
+            for k in over:
+                self.texts.pop(k)
+            dropped = len(over)
+        self.sel = min(self.sel, n - 1) if n else 0
+        self.reindex()
+        if self.slots:
+            self.slotsel.current(self.sel)
+        else:
+            self.slotsel.set("")
+        return dropped
 
     # ------------------------------------------------------------ 도움말
     def key_help(self, ev=None):
@@ -810,11 +844,19 @@ class App:
         self.pdf_path.set(d.get("pdf", ""))
         self.pageno.set(d.get("page", 1))
         self.side.set(d.get("side", "전체"))
+        # 분석에 실패하면 직전 페이지의 도형이 남아 화면과 결과가 어긋난다
+        self.shapes = []
+        self._target = None
         if os.path.exists(self.pdf_path.get()):
             self.analyze()
-        self.slots = [tuple(s) for s in d.get("slots", [])] or self.slots
+        else:
+            self.say("PDF를 찾지 못했습니다: %s" % self.pdf_path.get())
+            messagebox.showwarning("", "레이아웃 PDF를 찾지 못했습니다.\n경로를 다시 지정하고 분석하세요.")
+        if not self.shapes:
+            self.say("  도형이 없습니다. 이대로 만들면 글만 들어갑니다.")
+        self.slots = [tuple(s) for s in d.get("slots", [])]
         self.texts = {int(k): v for k, v in d.get("texts", {}).items()}
-        self.reindex()
+        self.sync_slots()
         mp = d.get("manuscript", "")
         if mp and os.path.exists(mp):
             self._read_manuscript(mp)

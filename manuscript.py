@@ -61,6 +61,16 @@ def _para_text(body):
             i += 1
         elif c in CHAR_ONLY:
             i += 1
+        elif 0xD800 <= c <= 0xDBFF and i + 1 < len(w) and 0xDC00 <= w[i + 1] <= 0xDFFF:
+            # UTF-16 대리 쌍. 유닛 하나씩 chr()로 바꾸면 고립 서로게이트가 되어
+            # 나중에 UTF-8로 못 쓴다. 수학 원고의 𝑓 같은 글자가 여기 해당한다.
+            out.append(chr(0x10000 + ((c - 0xD800) << 10) + (w[i + 1] - 0xDC00)))
+            i += 2
+        elif 0xD800 <= c <= 0xDFFF:
+            i += 1                      # 짝 없는 서로게이트는 버린다
+        elif c < 0x20 or c == 0x7F:
+            out.append(" " if c in (0x1E, 0x1F) else "")   # XML이 못 받는 제어문자
+            i += 1
         else:
             out.append(chr(c))
             i += 1
@@ -98,28 +108,41 @@ def _unesc(s):
              .replace("&quot;", '"').replace("&apos;", "'").replace("&amp;", "&"))
 
 
+HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
+
+
 def _load_hwpx(path):
+    """정규식으로 문단을 자르면 표에서 무너진다. 표는 문단 안에 표가 있고
+    그 안에 다시 문단이 있는 중첩이라, 비탐욕 매칭이 첫 셀에서 끊긴다.
+    ElementTree로 읽고 각 문단의 직계 run만 본다."""
+    import xml.etree.ElementTree as ET
     z = zipfile.ZipFile(path)
-    names = [n for n in z.namelist()
-             if re.match(r"Contents/section\d+\.xml$", n)]
+    names = [n for n in z.namelist() if re.match(r"Contents/section\d+\.xml$", n)]
     names.sort(key=lambda n: int(re.search(r"(\d+)", n).group(1)))
     paras = []
     for n in names:
-        s = z.read(n).decode("utf-8", "replace")
-        for pm in re.finditer(r"<hp:p\b[^>]*>(.*?)</hp:p>", s, re.S):
-            body = pm.group(1)
+        try:
+            root = ET.fromstring(z.read(n))
+        except Exception:
+            continue
+        for p in root.iter(HP + "p"):
             text, eqs = [], []
-            for m in re.finditer(
-                    r"<hp:t\b[^>]*/>|<hp:t\b[^>]*>(.*?)</hp:t>"
-                    r"|<hp:script\b[^>]*>(.*?)</hp:script>"
-                    r"|<hp:tab\b[^>]*/>", body, re.S):
-                if m.group(2) is not None:
-                    eqs.append(_unesc(m.group(2)))
-                    text.append(EQ_MARK)
-                elif m.group(1) is not None:
-                    text.append(_unesc(m.group(1)))
-                elif m.group(0).startswith("<hp:tab"):
-                    text.append("\t")
+            for run in p.findall(HP + "run"):       # 직계만. 셀 문단은 따로 잡힌다
+                for el in run:
+                    if el.tag == HP + "t":
+                        if el.text:
+                            text.append(el.text)
+                        for sub in el:              # t 안의 tab, markpenBegin 등
+                            if sub.tag == HP + "tab":
+                                text.append("\t")
+                            if sub.tail:
+                                text.append(sub.tail)
+                    elif el.tag == HP + "tab":
+                        text.append("\t")
+                    elif el.tag == HP + "equation":
+                        sc = el.find(HP + "script")
+                        eqs.append(sc.text or "" if sc is not None else "")
+                        text.append(EQ_MARK)
             paras.append({"text": "".join(text), "eq": eqs})
     z.close()
     return paras
@@ -147,7 +170,10 @@ def load_paragraphs(path):
 
 
 # ---------------------------------------------------------------- 문항 분리
-NUM_HEAD = re.compile(r"^\s*(\d{1,3})\s*[.)]\s*(?:\t|\s)")
+# "1. 다음" 과 "1.다음" 을 모두 잡는다. 뒤에 공백을 요구하면 한국어 원고의
+# 절반이 문항으로 안 잡힌다. 다만 "1.5" 같은 소수는 걸러야 하므로 마침표
+# 바로 뒤에 숫자가 오면 제외한다.
+NUM_HEAD = re.compile(r"^\s*(\d{1,3})\s*[.)](?!\d)\s*(?=\S)")
 
 
 def to_parts(paras):
@@ -225,8 +251,15 @@ def split_problems(paras, drop_preamble=True):
 
 
 def load(path):
-    """원고 파일 -> [{no, parts}, ...]"""
-    return split_problems(load_paragraphs(path))
+    """원고 파일 -> [{no, parts}, ...]
+
+    번호를 하나도 못 찾으면 머리말 버리기가 원고를 통째로 날린다.
+    그럴 때는 통으로 한 덩어리를 돌려주는 편이 낫다."""
+    paras = load_paragraphs(path)
+    out = split_problems(paras)
+    if not out and any(p.get("text", "").strip() for p in paras):
+        out = split_problems(paras, drop_preamble=False)
+    return out
 
 
 def parts_to_markup(parts):

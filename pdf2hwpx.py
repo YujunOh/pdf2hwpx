@@ -259,7 +259,27 @@ def line_xml(x1, y1, x2, y2, stroke="#000000", lw=0.5, z=0):
 
 
 # ---------------------------------------------------------------- 3. 텍스트와 수식
+# XML 1.0이 허용하지 않는 제어문자. 실제 hwp 원고에 U+001F가 흔히 들어 있고
+# 그대로 흘리면 한글이 파일을 아예 못 연다. 탭과 개행만 남긴다.
+_CTRL = {c: None for c in range(0x20) if c not in (0x09, 0x0A, 0x0D)}
+_CTRL[0x7F] = None
+_CTRL[0x18] = "-"      # 한글에서 하이픈 자리로 쓰인다
+_CTRL[0x1E] = " "
+_CTRL[0x1F] = " "
+
+
+def clean_text(s):
+    """제어문자와 고립 서로게이트를 걸러낸다. 두 경우 다 UTF-8로 못 쓴다."""
+    if not s:
+        return s
+    s = s.translate(_CTRL)
+    if any(0xD800 <= ord(c) <= 0xDFFF for c in s):
+        s = "".join(c for c in s if not (0xD800 <= ord(c) <= 0xDFFF))
+    return s
+
+
 def esc(s):
+    s = clean_text(s)
     return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
@@ -500,7 +520,12 @@ def build_section(shapes_xml, page_w_pt, page_h_pt):
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>'
             '<hs:sec %s>'
             '<hp:p id="1" paraPrIDRef="3" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
-            '<hp:run charPrIDRef="0">%s%s<hp:t/></hp:run>'
+            '<hp:run charPrIDRef="0">%s'
+            # colPr이 없으면 한글이 페이지 설정을 통째로 버리고 A4 기본값으로
+            # 되돌린다. A3 스프레드가 A4로 줄면서 오른쪽 도형이 사라진다.
+            '<hp:ctrl><hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1"'
+            ' sameSz="1" sameGap="0"/></hp:ctrl>'
+            '%s<hp:t/></hp:run>'
             '<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="1000" textheight="1000"'
             ' baseline="850" spacing="600" horzpos="0" horzsize="%d" flags="393216"/>'
             '</hp:linesegarray></hp:p></hs:sec>'
@@ -518,7 +543,15 @@ def base_charpr_count(template):
 
 
 def write_hwpx(template, section_xml, out_path, style_table=None):
-    """템플릿 hwpx에서 section0.xml을 갈아끼우고, 글자모양이 있으면 header.xml도 고친다."""
+    """템플릿 hwpx에서 section0.xml을 갈아끼우고, 글자모양이 있으면 header.xml도 고친다.
+
+    쓰기 전에 XML을 한 번 파싱한다. 깨진 채로 저장하면 파일 크기는 멀쩡한데
+    한글이 열지 못해서, 사용자가 열어 볼 때까지 아무도 모른다."""
+    import xml.etree.ElementTree as ET
+    try:
+        ET.fromstring(section_xml)
+    except Exception as e:
+        raise ValueError("본문 XML이 잘못됐습니다: %s" % e)
     zin = zipfile.ZipFile(template, "r")
     if os.path.exists(out_path):
         os.remove(out_path)
