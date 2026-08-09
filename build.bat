@@ -15,6 +15,11 @@ if errorlevel 1 (
     %PY% -m pip install pyinstaller
 )
 
+rem 안 쓰는 무거운 것들을 뺀다. 115MB에서 34MB로 줄어든다.
+rem   lxml 7MB      XML은 정규식으로 처리한다
+rem   PIL 11MB      스크린샷 캡처에만 쓰고 그건 개발용이다
+rem   Pythonwin 7MB pywin32의 MFC GUI 부분. COM만 쓰므로 필요 없다
+rem setuptools, pip, unittest, pydoc은 빼지 말 것. 빼면 exe가 조용히 멈춘다.
 %PY% -m PyInstaller --noconfirm --clean ^
   --onefile ^
   --noconsole ^
@@ -23,6 +28,13 @@ if errorlevel 1 (
   --exclude-module matplotlib ^
   --exclude-module numpy ^
   --exclude-module pytest ^
+  --exclude-module pandas ^
+  --exclude-module lxml ^
+  --exclude-module PIL ^
+  --exclude-module Pythonwin ^
+  --exclude-module win32ui ^
+  --exclude-module win32uiole ^
+  --exclude-module dde ^
   gui.py
 
 if errorlevel 1 (

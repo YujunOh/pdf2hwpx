@@ -584,13 +584,16 @@ if __name__ == "__main__":
                 app.analyze()
                 app.fill_all()
                 root.update()
-                from PIL import ImageGrab
-                import time
-                root.attributes("-topmost", True); root.lift(); root.focus_force()
-                root.update(); time.sleep(0.7); root.update()
-                x, y = root.winfo_rootx(), root.winfo_rooty()
-                ImageGrab.grab(bbox=(x, y, x + root.winfo_width(), y + root.winfo_height()),
-                               all_screens=True).save(os.path.join(OUTDIR, "gui_미리보기.png"))
+                try:            # 스크린샷은 문서용이라 없어도 그만이다
+                    from PIL import ImageGrab
+                    import time
+                    root.attributes("-topmost", True); root.lift(); root.focus_force()
+                    root.update(); time.sleep(0.7); root.update()
+                    x, y = root.winfo_rootx(), root.winfo_rooty()
+                    ImageGrab.grab(bbox=(x, y, x + root.winfo_width(), y + root.winfo_height()),
+                                   all_screens=True).save(os.path.join(OUTDIR, "gui_미리보기.png"))
+                except Exception as e:
+                    app.say("스크린샷 건너뜀: %s" % e)
                 app.build()
                 with open(os.path.join(OUTDIR, "gui_demo_log.txt"), "w", encoding="utf-8") as f:
                     f.write(app.log.get("1.0", "end"))
