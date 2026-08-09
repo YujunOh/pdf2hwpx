@@ -229,15 +229,7 @@ class App:
             n_l = sum(1 for s in self.shapes if s["k"] == "line")
             n_t = sum(1 for s in self.shapes if s["k"] == "text")
 
-            bars = sorted([s for s in self.shapes
-                           if s["k"] == "rect" and 240 < s["w"] < 270 and 20 < s["h"] < 30],
-                          key=lambda s: (s["y"], s["x"]))
-            self.slots = []
-            for b in bars:
-                top = b["y"] + b["h"] + 8
-                below = [c["y"] for c in bars if c["y"] > b["y"] + 5 and abs(c["x"] - b["x"]) < 20]
-                bottom = (min(below) - 14) if below else (self.page_h - 40)
-                self.slots.append((b["x"] + 10, top, b["w"] - 20, bottom - top))
+            self.slots = self.detect_slots()
 
             self.info.config(text=(
                 "%.0f x %.0f mm   사각형 %d · 직선 %d · 원본텍스트 %d\n"
@@ -256,6 +248,62 @@ class App:
             self.redraw()
         except Exception:
             self.say(traceback.format_exc())
+
+    # ------------------------------------------------------------ 슬롯 검출
+    def detect_slots(self):
+        """두 가지 패턴을 다 시도해서 많이 잡히는 쪽을 쓴다.
+        (a) 문제마다 색 띠 헤더가 있고 그 아래가 본문인 배치
+        (b) 테두리만 있는 큰 빈 상자가 문제 칸인 배치"""
+        W, H = self.page_w, self.page_h
+
+        def bbox(s):
+            if s["k"] == "rect":
+                return s["x"], s["y"], s["w"], s["h"]
+            if s["k"] == "curve":
+                xs = [p[0] for p in s["pts"]]
+                ys = [p[1] for p in s["pts"]]
+                return min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
+            return None
+
+        # (a) 색으로 채운 가로 띠. 폭이 페이지의 3할 넘고 높이가 낮은 것.
+        # 알약 모양 헤더는 곡선으로 들어오므로 curve도 본다.
+        bars = []
+        for s in self.shapes:
+            if not s.get("fill") or s["k"] not in ("rect", "curve"):
+                continue
+            bb = bbox(s)
+            if bb and bb[2] > W * 0.3 and 14 < bb[3] < 40:
+                bars.append({"x": bb[0], "y": bb[1], "w": bb[2], "h": bb[3]})
+        bars.sort(key=lambda s: (round(s["y"], 1), s["x"]))
+        a = []
+        for b in bars:
+            top = b["y"] + b["h"] + 8
+            below = [c["y"] for c in bars
+                     if c["y"] > b["y"] + 5 and abs(c["x"] - b["x"]) < 20]
+            bottom = (min(below) - 14) if below else (H - 40)
+            if bottom - top > 60:
+                a.append((b["x"] + 10, top, b["w"] - 20, bottom - top))
+
+        # (b) 테두리만 있고 속이 빈 큰 상자. 둥근 상자는 curve로 들어온다
+        boxes = []
+        for s in self.shapes:
+            if s.get("fill") or not s.get("stroke"):
+                continue
+            if s["k"] == "rect":
+                x, y, w, h = s["x"], s["y"], s["w"], s["h"]
+            elif s["k"] == "curve":
+                xs = [p[0] for p in s["pts"]]
+                ys = [p[1] for p in s["pts"]]
+                x, y, w, h = min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
+            else:
+                continue
+            if w > W * 0.35 and h > 80:
+                boxes.append((x + 10, y + 34, w - 20, h - 44))
+        b_ = sorted(boxes, key=lambda t: (round(t[1], 1), t[0]))
+
+        picked = a if len(a) >= len(b_) else b_
+        self._slot_mode = "헤더 띠" if picked is a else "빈 상자"
+        return picked
 
     # ------------------------------------------------------------ 미리보기
     def redraw(self):
@@ -395,6 +443,19 @@ class App:
         self.redraw()
 
     # ------------------------------------------------------------ 생성
+    def fit_size(self, parts, w_pt, h_pt):
+        """칸에 들어가는 가장 큰 글자 크기를 찾는다. 임의로 잘라내지는 않는다."""
+        cv = tk.Canvas(self.root)          # 화면에 붙이지 않는 측정용
+        try:
+            for size in (10.5, 10.0, 9.5, 9.0):
+                cv.delete("all")
+                end = pv.render_parts(cv, parts, 0, 0, w_pt - 8, px=size)
+                if end <= h_pt - 6:
+                    return size, False
+            return 9.0, True
+        finally:
+            cv.destroy()
+
     def build(self):
         try:
             if not self.slots:
@@ -402,7 +463,6 @@ class App:
                 return
             tpl = core.template_path()
             table = core.StyleTable(core.base_charpr_count(tpl))
-            body_cp = table.get("맑은 고딕", False, 10.5, "#1A1A1A")
             xml, z = [], 0
             for s in self.shapes:
                 if s["k"] == "rect":
@@ -432,7 +492,13 @@ class App:
                     continue
                 parts = parse_markup(txt)
                 n_eq += count_eq(parts)
-                inner = core.paras_from_parts(parts, char_pr=body_cp, width_hu=core.hu(w))
+                size, over = self.fit_size(parts, w, h)
+                if size < 10.5:
+                    self.say("  슬롯%d 글자를 %.1fpt로 줄여 맞췄습니다." % (i, size))
+                if over:
+                    self.say("  슬롯%d 는 9pt로도 넘칩니다. 문제를 줄이거나 칸을 키우세요." % i)
+                cp = table.get("맑은 고딕", False, size, "#1A1A1A")
+                inner = core.paras_from_parts(parts, char_pr=cp, width_hu=core.hu(w))
                 xml.append(core.rect_xml(x, y, w, h, fill=None, stroke=None, lw=0, z=z, inner=inner))
                 z += 1
             section = core.build_section("".join(xml), self.page_w, self.page_h)
