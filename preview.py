@@ -185,17 +185,14 @@ class EqLayout:
         self._fonts = {}
 
     def font(self, px, italic=False, roman=False):
+        """Cambria Math는 쓰지 않는다. 큰 괄호와 적분 기호를 담느라 폰트 메트릭의
+        ascent와 descent가 극단적으로 커서, 22픽셀을 요청하면 123픽셀짜리 상자가
+        나온다. 글자가 상자 안에서 위로 밀려 배치가 통째로 어긋난다."""
         size = -max(int(round(px)), 6)          # tk는 정수만 받는다
         key = (size, italic, roman)
         if key not in self._fonts:
-            fam = "Times New Roman" if roman else "Cambria Math"
-            try:
-                f = tkfont.Font(family=fam, size=size,
-                                slant="italic" if italic else "roman")
-                f.metrics("linespace")
-            except Exception:
-                f = tkfont.Font(family="Times New Roman", size=size,
-                                slant="italic" if italic else "roman")
+            f = tkfont.Font(family="Times New Roman", size=size,
+                            slant="italic" if italic else "roman")
             self._fonts[key] = f
         return self._fonts[key]
 
@@ -311,38 +308,56 @@ def body_font(px):
 
 
 def render_parts(cv, parts, x, y, w, px=13, fill="#111111", tags=("body",), lh=1.55):
-    """텍스트와 수식이 섞인 parts를 캔버스에 흘려 그린다. 마지막 y를 반환."""
+    """텍스트와 수식이 섞인 parts를 캔버스에 흘려 그린다. 마지막 아래끝을 반환.
+
+    줄을 먼저 짠 다음 그린다. 그리면서 baseline을 조정하면 키 큰 수식이
+    윗줄로 튀어나간다."""
     eq = EqLayout(px)
-    cx, cy = x, y + px
-    line_h = px * lh
+    f = body_font(px)
+    epx = px * 1.05
+
+    # 1) 줄 짜기. 각 조각은 (종류, 값, 폭, 위, 아래)
+    lines, cur, cw = [], [], 0.0
+
+    def wrap():
+        nonlocal cur, cw
+        lines.append(cur)
+        cur, cw = [], 0.0
+
     for p in parts:
         if p.get("br"):
-            cx = x
-            cy += line_h
+            wrap()
             continue
         if "eq" in p:
             node = parse_script(p["eq"])
-            ew, ea, eb = eq.measure(node, px * 1.05)
-            if cx + ew > x + w and cx > x:
-                cx = x
-                cy += line_h
-            # 위로 솟는 만큼 baseline을 미리 내려야 윗줄과 안 겹친다
-            rise = max(0.0, ea - px * 0.85)
-            cy += rise
-            eq.draw(cv, node, cx, cy, px * 1.05, fill, tags)
-            cx += ew + 2
-            # 아래로 내려간 만큼은 다음 줄로 넘긴다
-            drop = max(0.0, eb - px * 0.3)
-            if drop:
-                cy += drop
-                cx = x
+            ew, ea, eb = eq.measure(node, epx)
+            if cw + ew > w and cur:
+                wrap()
+            cur.append(("eq", node, ew, ea, eb))
+            cw += ew + 2
             continue
-        f = body_font(px)
         for word in re.findall(r"\S+\s*|\s+", p.get("t", "")):
             ww = f.measure(word)
-            if cx + ww > x + w and cx > x:
-                cx = x
-                cy += line_h
-            cv.create_text(cx, cy, text=word, anchor="sw", font=f, fill=fill, tags=tags)
-            cx += ww
+            if cw + ww > w and cur:
+                wrap()
+            cur.append(("t", word, ww, px * 0.78, px * 0.24))
+            cw += ww
+    wrap()
+
+    # 2) 줄마다 높이를 재서 그린다
+    cy = y
+    for ln in lines:
+        above = max([c[3] for c in ln], default=px * 0.78)
+        below = max([c[4] for c in ln], default=px * 0.24)
+        base = cy + above
+        cx = x
+        for kind, val, cwid, _, _ in ln:
+            if kind == "eq":
+                eq.draw(cv, val, cx, base, epx, fill, tags)
+                cx += cwid + 2
+            else:
+                cv.create_text(cx, base, text=val, anchor="sw", font=f, fill=fill, tags=tags)
+                cx += cwid
+        # 빈 줄도 한 줄 높이는 차지한다
+        cy = base + max(below, px * (lh - 0.78))
     return cy

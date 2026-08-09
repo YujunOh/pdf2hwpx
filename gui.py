@@ -67,6 +67,7 @@ DEFAULT_KEYS = {
     "equation": "<Control-m>",
     "zoom": "<F2>",
     "toggle_log": "<F9>",
+    "help": "<F1>",
 }
 
 KEY_HELP = {
@@ -74,7 +75,7 @@ KEY_HELP = {
     "analyze": "레이아웃 분석", "build": "HWPX 만들기", "verify": "한글로 확인",
     "next_slot": "다음 슬롯", "prev_slot": "이전 슬롯",
     "circled": "원문자 순환 (3 누르고 눌러 ③)", "equation": "수식 넣기",
-    "zoom": "확대 토글", "toggle_log": "로그 접기",
+    "zoom": "확대 토글", "toggle_log": "로그 접기", "help": "도움말",
 }
 
 
@@ -106,6 +107,30 @@ def next_circled(ch):
     if 0x2474 <= o <= 0x2487:          # ⑴ ~ ⒇
         return str(o - 0x2474 + 1)
     return ch
+
+
+EQ_GUIDE = [
+    ("분수", "{a} over {b}", "가로선 없는 분수는 atop"),
+    ("근호", "sqrt {a}", "세제곱근은 sqrt {3} of {a}"),
+    ("위첨자", "x ^{2}", "여러 글자는 중괄호로 묶는다"),
+    ("아래첨자", "a_{n}", ""),
+    ("적분", "int _{0} ^{1} f(x) dx", "oint dint tint 도 있다"),
+    ("극한", "lim _{x ``rarrow`` 0} f(x)", "lim은 소문자"),
+    ("합과 곱", "sum _{k=1} ^{n} a_{k}", "prod union inter"),
+    ("괄호", "left( x right)", "내용 높이에 맞춰 늘어난다"),
+    ("행렬", "matrix{a & b # c & d}", "pmatrix bmatrix dmatrix"),
+    ("연립", "cases{2x+y=4 # 3x-4y=-1}", "#이 줄바꿈, &가 칸 맞춤"),
+    ("빈칸", "` 또는 ~", "백틱이 좁은 칸, 물결이 보통 칸"),
+    ("로만체", "rm 2H_2 O", "영문은 기본이 이탤릭이다"),
+    ("기호", "+- GEQ LEQ NEQ rarrow pi theta", "그리스는 이름 그대로"),
+]
+
+EQ_TRAPS = [
+    "한 낱말이 아홉 자를 넘으면 수식 편집기가 두 항으로 쪼갠다. 앞뒤를 큰따옴표로 묶어야 한다.",
+    "스페이스는 화면 공백이 아니라 항 구분이다. 실제 공백은 백틱이나 물결로 넣는다.",
+    "sin cos log lim max min 은 자동으로 로만체가 된다. 나머지 영문은 이탤릭이다.",
+    "left( 와 LEFT ( 는 같은 뜻이다. 원고마다 대소문자가 섞여 온다.",
+]
 
 
 def parse_markup(text):
@@ -152,6 +177,7 @@ class App:
         self.proj_path = ""
         self.log_shown = True
         self.keys, self.keys_path = load_keys()
+        self._help = None
         self.result_imgs = []
         self._build()
 
@@ -211,8 +237,14 @@ class App:
         ttk.Button(mrow, text="순서대로 채우기", command=self.autofill).pack(side="left", padx=6)
         self.mlabel = ttk.Label(mrow, text="hwp, hwpx, txt", foreground="#777777")
         self.mlabel.pack(side="left")
-        self.problist = tk.Listbox(mf, height=5, font=("맑은 고딕", 9))
-        self.problist.pack(fill="x", pady=(6, 0))
+        plw = ttk.Frame(mf)
+        plw.pack(fill="x", pady=(6, 0))
+        self.problist = tk.Listbox(plw, height=5, font=("맑은 고딕", 9),
+                                   activestyle="none")
+        psb = ttk.Scrollbar(plw, orient="vertical", command=self.problist.yview)
+        self.problist.configure(yscrollcommand=psb.set)
+        self.problist.pack(side="left", fill="x", expand=True)
+        psb.pack(side="right", fill="y")
         self.problist.bind("<Double-Button-1>", self.put_problem)
 
         sf = ttk.LabelFrame(rf, text="문제 입력", padding=6)
@@ -247,8 +279,9 @@ class App:
         ttk.Button(act, text="HWPX 만들기", command=self.build).pack(side="left")
         ttk.Button(act, text="한글로 열어 확인", command=self.verify).pack(side="left", padx=6)
         ttk.Button(act, text="결과 폴더", command=self.open_dir).pack(side="left")
+        ttk.Button(act, text="도움말 F1", command=self.show_help).pack(side="right")
 
-        self.log = tk.Text(self.root, height=6, font=("Consolas", 9),
+        self.log = tk.Text(self.root, height=4, font=("Consolas", 9),
                            bg="#1e1e1e", fg="#d4d4d4")
         self.log.pack(fill="x", padx=8, pady=(0, 8))
         self.bind_keys()
@@ -454,14 +487,20 @@ class App:
                 cv.create_rectangle(X(x), Y(y), X(x + w), Y(y + h),
                                     outline="#d43f3a" if on else "#9db8dd",
                                     width=2 if on else 1, dash=() if on else (4, 3))
-                # 라벨은 슬롯 밖 왼쪽 위에. 본문과 겹치면 읽기 어렵다
-                cv.create_text(X(x), Y(y) - 3, anchor="sw", text="슬롯%d" % i,
-                               fill="#d43f3a" if on else "#9db8dd",
-                               font=("맑은 고딕", -max(int(7 * sc * 1.5), 9), "bold"))
+                # 번호는 고른 칸에만. 전부 붙이면 원본 헤더 배지와 겹쳐 지저분하다
+                if on:
+                    # 본문은 위에서 아래로 차니 배지는 아래쪽 구석에 둔다
+                    fs = max(int(7 * sc * 1.4), 9)
+                    bw, bh = fs * 2.4, fs * 1.5
+                    lx, ly = X(x + w) - bw - 3, Y(y + h) - bh - 3
+                    cv.create_rectangle(lx, ly, lx + bw, ly + bh,
+                                        fill="#d43f3a", outline="")
+                    cv.create_text(lx + bw / 2, ly + bh / 2, text="%d" % i,
+                                   fill="#ffffff", font=("맑은 고딕", -fs, "bold"))
             txt = self.texts.get(i, "").strip()
             if txt:
                 px = max(int(10.5 * sc), 6)
-                end = pv.render_parts(cv, parse_markup(txt), X(x) + 4, Y(y) + 2,
+                end = pv.render_parts(cv, parse_markup(txt), X(x) + 4, Y(y) + 2 + (px * 0.2 if self.showgrid.get() else 0),
                                       w * sc - 8, px=px, tags=("body", "s%d" % i))
                 if end > Y(y + h):
                     cv.create_rectangle(X(x), Y(y), X(x + w), Y(y + h),
@@ -559,6 +598,115 @@ class App:
 
     def reindex(self):
         self.slotsel["values"] = ["슬롯%d" % i for i in range(len(self.slots))]
+
+    # ------------------------------------------------------------ 도움말
+    def key_help(self, ev=None):
+        self.show_help(); return "break"
+
+    def show_help(self):
+        if getattr(self, "_help", None) and self._help.winfo_exists():
+            self._help.lift(); self._help.focus_force(); return
+        w = tk.Toplevel(self.root)
+        self._help = w
+        w.title("도움말")
+        w.geometry("760x640")
+        w.minsize(620, 480)
+        w.transient(self.root)
+        nb = ttk.Notebook(w)
+        nb.pack(fill="both", expand=True, padx=10, pady=10)
+
+        def sheet(parent):
+            fr = ttk.Frame(parent)
+            cv = tk.Canvas(fr, highlightthickness=0, bg="#ffffff")
+            sb = ttk.Scrollbar(fr, orient="vertical", command=cv.yview)
+            inner = ttk.Frame(cv)
+            win = cv.create_window((0, 0), window=inner, anchor="nw")
+            inner.bind("<Configure>",
+                       lambda e: cv.configure(scrollregion=cv.bbox("all")))
+            # 내용이 창 폭을 다 쓰도록 맞춘다. 안 하면 오른쪽이 비어 보인다
+            cv.bind("<Configure>", lambda e: cv.itemconfig(win, width=e.width))
+            cv.configure(yscrollcommand=sb.set)
+            cv.pack(side="left", fill="both", expand=True)
+            sb.pack(side="right", fill="y")
+            # bind_all로 걸면 도움말을 닫은 뒤에도 메인 창이 이 휠을 먹는다
+            cv.bind("<MouseWheel>", lambda e: cv.yview_scroll(int(-e.delta / 120), "units"))
+            inner.bind("<MouseWheel>", lambda e: cv.yview_scroll(int(-e.delta / 120), "units"))
+            return fr, inner
+
+        # --- 단축키
+        f1, k = sheet(nb)
+        nb.add(f1, text="단축키")
+        ttk.Label(k, text="한글에서 쓰던 키를 그대로 가져왔습니다.",
+                  font=("맑은 고딕", 10, "bold")).grid(row=0, column=0, columnspan=2,
+                                                     sticky="w", padx=12, pady=(10, 8))
+        r = 1
+        for name, seq in self.keys.items():
+            pretty = (seq.strip("<>").replace("Control-", "Ctrl+").replace("Alt-", "Alt+")
+                      .replace("Shift-", "Shift+").replace("Return", "Enter"))
+            if len(pretty) == 1:
+                pretty = pretty.upper()
+            ttk.Label(k, text=pretty, font=("Consolas", 10),
+                      foreground="#1a4f8a").grid(row=r, column=0, sticky="w", padx=(18, 16), pady=3)
+            ttk.Label(k, text=KEY_HELP.get(name, name)).grid(row=r, column=1, sticky="w", pady=3)
+            r += 1
+        ttk.Label(k, text="이 파일을 고치면 키가 바뀝니다.",
+                  foreground="#666666").grid(row=r, column=0, columnspan=2,
+                                             sticky="w", padx=12, pady=(14, 2))
+        e = ttk.Entry(k, width=74)
+        e.insert(0, self.keys_path)
+        e.configure(state="readonly")
+        e.grid(row=r + 1, column=0, columnspan=2, sticky="w", padx=18, pady=(0, 14))
+
+        # --- 쓰는 순서
+        f2, u = sheet(nb)
+        nb.add(f2, text="쓰는 순서")
+        steps = [
+            ("1. 레이아웃 PDF 열기",
+             "디자이너가 만든 빈 교재 PDF를 고릅니다. 도형과 글자를 읽어 문제 칸을 찾아\n"
+             "왼쪽 미리보기에 겹쳐 보여줍니다. 쪽과 면(좌면 우면)을 지정할 수 있습니다."),
+            ("2. 칸이 틀렸으면 손으로 고치기",
+             "빈 곳을 끌면 새 칸이 그려집니다. 칸 안쪽을 끌면 옮겨지고, 오른쪽 아래\n"
+             "모서리를 끌면 크기가 바뀝니다. 오른쪽 버튼으로 지웁니다."),
+            ("3. 선생님 원고 불러오기",
+             "hwp, hwpx, txt를 읽어 문항과 수식을 뽑습니다. 목록에서 두 번 누르면\n"
+             "고른 칸에 들어가고, 순서대로 채우기를 누르면 한 번에 배분됩니다."),
+            ("4. 손질하기",
+             "달러 기호 사이가 수식입니다. 타이핑하는 동안 왼쪽이 바로 갱신됩니다.\n"
+             "칸보다 글이 길면 글자를 줄여 맞추고, 그래도 넘치면 알려 줍니다."),
+            ("5. HWPX 만들기",
+             "한글에서 열어 고칠 수 있는 파일이 나옵니다. 한글로 열어 확인을 누르면\n"
+             "실제로 열어 PDF로 뽑아 보여줍니다."),
+        ]
+        for i, (t, d) in enumerate(steps):
+            ttk.Label(u, text=t, font=("맑은 고딕", 10, "bold")).grid(
+                row=i * 2, column=0, sticky="w", padx=14, pady=(12, 2))
+            ttk.Label(u, text=d, justify="left", foreground="#444444").grid(
+                row=i * 2 + 1, column=0, sticky="w", padx=26)
+        ttk.Label(u, text="작업은 저장됩니다. Ctrl+S 로 dhp 파일에 담고 Ctrl+O 로 엽니다.",
+                  foreground="#1a4f8a").grid(row=99, column=0, sticky="w", padx=14, pady=16)
+
+        # --- 수식
+        f3, q = sheet(nb)
+        nb.add(f3, text="수식 쓰는 법")
+        ttk.Label(q, text="한글 수식 편집기 문법을 그대로 씁니다. 달러 기호 사이에 적으세요.",
+                  font=("맑은 고딕", 10, "bold")).grid(row=0, column=0, columnspan=3,
+                                                     sticky="w", padx=12, pady=(10, 8))
+        for i, (name, code, note) in enumerate(EQ_GUIDE):
+            ttk.Label(q, text=name).grid(row=i + 1, column=0, sticky="w", padx=(18, 12), pady=3)
+            ttk.Label(q, text=code, font=("Consolas", 10),
+                      foreground="#1a4f8a").grid(row=i + 1, column=1, sticky="w", pady=3)
+            ttk.Label(q, text=note, foreground="#777777").grid(row=i + 1, column=2,
+                                                              sticky="w", padx=(14, 12), pady=3)
+        base = len(EQ_GUIDE) + 2
+        ttk.Label(q, text="자주 걸리는 함정", font=("맑은 고딕", 10, "bold")).grid(
+            row=base, column=0, columnspan=3, sticky="w", padx=12, pady=(16, 6))
+        for i, t in enumerate(EQ_TRAPS):
+            ttk.Label(q, text="· " + t, justify="left", foreground="#444444",
+                      wraplength=660).grid(row=base + 1 + i, column=0, columnspan=3,
+                                           sticky="w", padx=20, pady=2)
+
+        ttk.Button(w, text="닫기", command=w.destroy).pack(pady=(0, 10))
+        w.bind("<Escape>", lambda e: w.destroy())
 
     # ------------------------------------------------------------ 저장과 단축키
     def bind_keys(self):
