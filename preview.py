@@ -36,6 +36,38 @@ BIGOPS = {"int": "∫", "iint": "∬", "oint": "∮", "sum": "∑", "prod": "∏
 ROMAN = {"sin", "cos", "tan", "sec", "csc", "cot", "log", "ln", "exp",
          "lim", "max", "min", "det", "dim", "gcd", "if", "for", "and", "or"}
 
+# 원고에는 >= 로 오지만 인쇄물에는 ≥ 로 나가야 한다
+TXTSYM = {">=": "≥", "=>": "≥", "<=": "≤", "=<": "≤", "!=": "≠", "<>": "≠",
+          "==": "=", "->": "→", "<-": "←", "+-": "±", "-+": "∓", "~=": "≈"}
+
+# 이항 연산자. 앞뒤에 숨을 주지 않으면 x^2+4x+4 처럼 다 붙어 읽기 어렵다.
+# 조판 관례가 연산자 좌우에 여백을 두는 데는 이유가 있다
+BINOPS = set("+=<>±×÷≤≥≠≈≡→←∈∉⊂⊃∪∩")
+# 빼기는 음수 부호로도 쓰여서 따로 다룬다
+MINUS = "-−"
+
+# 시그마와 곱은 첨자를 기호 위아래에 놓는다. 옆에 붙이면 지저분하다.
+# 적분은 옆에 놓는 것이 관례다
+STACKED = {"∑", "∏", "∪", "∩"}
+
+
+def stacked(node):
+    """첨자를 기호 위아래에 놓아야 하는 노드인지. 시그마와 곱, 그리고 lim."""
+    if node[0] == "big":
+        return node[1] in STACKED or node[1] == "lim"
+    if node[0] == "row" and len(node[1]) == 1:
+        return stacked(node[1][0])
+    return False
+
+
+def op_pad(node, px):
+    """이 노드가 이항 연산자면 좌우에 줄 여백."""
+    if node[0] == "txt" and node[1] in BINOPS:
+        return px * 0.20
+    if node[0] == "rm" and node[1] in ROMAN:
+        return px * 0.10          # sin 2x 처럼 함수명 뒤가 붙지 않게
+    return 0.0
+
 
 # ---------------------------------------------------------------- 파서
 def tokenize(s):
@@ -69,7 +101,16 @@ def tokenize(s):
                 j += 1
             if j == i:
                 j = i + 1
-            out.append(("txt", s[i:j])); i = j
+            piece = s[i:j]
+            # >= 처럼 두 글자로 오는 것을 먼저 떼어 기호로 바꾼다
+            k2 = 0
+            while k2 < len(piece):
+                two = piece[k2:k2 + 2]
+                if two in TXTSYM:
+                    out.append(("txt", TXTSYM[two])); k2 += 2
+                else:
+                    out.append(("txt", piece[k2])); k2 += 1
+            i = j
     return out
 
 
@@ -213,7 +254,7 @@ class EqLayout:
             return w, a, b
         if k in ("txt", "var", "rm"):
             f = self.font(px, italic=(k == "var"), roman=(k == "rm"))
-            return f.measure(node[1]), px * 0.75, px * 0.25
+            return f.measure(node[1]) + op_pad(node, px) * 2, px * 0.75, px * 0.25
         if k == "sp":
             return node[1] * px / 14.0, px * 0.7, px * 0.2
         if k == "frac":
@@ -227,6 +268,10 @@ class EqLayout:
         if k in ("sup", "sub"):
             bw, ba, bb = self.measure(node[1], px)
             sw, sa, sb = self.measure(node[2], px * 0.68)
+            if stacked(node[1]):
+                if k == "sup":
+                    return max(bw, sw) + px * 0.16, ba + sa + sb + px * 0.08, bb
+                return max(bw, sw) + px * 0.16, ba, bb + sa + sb + px * 0.06
             if k == "sup":
                 return bw + sw + 1, max(ba, ba * 0.55 + sa + sb), bb
             return bw + sw + 1, ba, max(bb, bb * 0.5 + sa + sb)
@@ -234,6 +279,10 @@ class EqLayout:
             bw, ba, bb = self.measure(node[1], px)
             uw, ua, ub = self.measure(node[2], px * 0.68)
             lw, la, lb = self.measure(node[3], px * 0.68)
+            if stacked(node[1]):
+                return (max(bw, uw, lw) + px * 0.16,
+                        ba + ua + ub + px * 0.08,
+                        bb + la + lb + px * 0.06)
             sw = max(uw, lw)
             return bw + sw + 1, max(ba, ba * 0.55 + ua + ub), max(bb, bb * 0.5 + la + lb)
         if k == "big":
@@ -251,8 +300,10 @@ class EqLayout:
             return cx - x
         if k in ("txt", "var", "rm"):
             f = self.font(px, italic=(k == "var"), roman=(k == "rm"))
-            cv.create_text(x, y, text=node[1], anchor="sw", font=f, fill=fill, tags=tags)
-            return f.measure(node[1])
+            pad = op_pad(node, px)
+            cv.create_text(x + pad, y, text=node[1], anchor="sw", font=f,
+                           fill=fill, tags=tags)
+            return f.measure(node[1]) + pad * 2
         if k == "sp":
             return node[1] * px / 14.0
         if k == "frac":
@@ -276,22 +327,41 @@ class EqLayout:
             cv.create_line(x + sw - 1, top, x + sw + iw + 2, top, fill=fill, tags=tags)
             self.draw(cv, node[1], x + sw + 1, y, px, fill, tags)
             return sw + iw + px * 0.2
-        if k == "sup":
+        if k in ("sup", "sub"):
+            sp = px * 0.68
+            sw, sa, sb = self.measure(node[2], sp)
+            if stacked(node[1]):
+                bw, ba, bb = self.measure(node[1], px)
+                w = max(bw, sw)
+                self.draw(cv, node[1], x + (w - bw) / 2, y, px, fill, tags)
+                if k == "sup":
+                    self.draw(cv, node[2], x + (w - sw) / 2, y - ba - sb - px * 0.08,
+                              sp, fill, tags)
+                else:
+                    self.draw(cv, node[2], x + (w - sw) / 2, y + bb + sa + px * 0.06,
+                              sp, fill, tags)
+                return w + px * 0.16
             bw = self.draw(cv, node[1], x, y, px, fill, tags)
-            self.draw(cv, node[2], x + bw + 1, y - px * 0.45, px * 0.68, fill, tags)
-            sw, _, _ = self.measure(node[2], px * 0.68)
-            return bw + sw + 1
-        if k == "sub":
-            bw = self.draw(cv, node[1], x, y, px, fill, tags)
-            self.draw(cv, node[2], x + bw + 1, y + px * 0.22, px * 0.68, fill, tags)
-            sw, _, _ = self.measure(node[2], px * 0.68)
+            dy = -px * 0.45 if k == "sup" else px * 0.22
+            self.draw(cv, node[2], x + bw + 1, y + dy, sp, fill, tags)
             return bw + sw + 1
         if k == "supsub":
+            sp = px * 0.68
+            uw, ua, ub = self.measure(node[2], sp)
+            lw, la, lb = self.measure(node[3], sp)
+            if stacked(node[1]):
+                # 시그마 위아래에 얹는다. 옆에 붙이면 기호가 커서 지저분하다
+                bw, ba, bb = self.measure(node[1], px)
+                w = max(bw, uw, lw)
+                self.draw(cv, node[1], x + (w - bw) / 2, y, px, fill, tags)
+                self.draw(cv, node[2], x + (w - uw) / 2, y - ba - ub - px * 0.08,
+                          sp, fill, tags)
+                self.draw(cv, node[3], x + (w - lw) / 2, y + bb + la + px * 0.06,
+                          sp, fill, tags)
+                return w + px * 0.16
             bw = self.draw(cv, node[1], x, y, px, fill, tags)
-            uw, _, _ = self.measure(node[2], px * 0.68)
-            lw, _, _ = self.measure(node[3], px * 0.68)
-            self.draw(cv, node[2], x + bw + 1, y - px * 0.45, px * 0.68, fill, tags)
-            self.draw(cv, node[3], x + bw + 1, y + px * 0.22, px * 0.68, fill, tags)
+            self.draw(cv, node[2], x + bw + 1, y - px * 0.45, sp, fill, tags)
+            self.draw(cv, node[3], x + bw + 1, y + px * 0.22, sp, fill, tags)
             return bw + max(uw, lw) + 1
         if k == "big":
             islim = node[2]
