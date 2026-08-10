@@ -191,8 +191,8 @@ class App:
         root.minsize(MIN_W, MIN_H)
 
         self.pdf_path = tk.StringVar(value=DEFAULT_PDF)
-        self.pageno = tk.IntVar(value=3)
-        self.side = tk.StringVar(value="우면")
+        self.pageno = tk.IntVar(value=1)
+        self.side = tk.StringVar(value="전체")
         self.showgrid = tk.BooleanVar(value=True)
         self.zoomsel = tk.BooleanVar(value=False)
         self.striptext = tk.BooleanVar(value=True)
@@ -216,6 +216,14 @@ class App:
         self.proj_path = ""
         self.log_shown = True
         self.keys, self.keys_path = load_keys()
+        self.recent = []
+        try:
+            rp = os.path.join(core.work_dir(), "recent.json")
+            if os.path.exists(rp):
+                self.recent = [q for q in json.load(open(rp, encoding="utf-8")).get("recent", [])
+                               if os.path.exists(q)]
+        except Exception:
+            pass
         self._help = None
         self._text_boxes = []
         self.result_imgs = []
@@ -252,6 +260,7 @@ class App:
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
         self.canvas.bind("<Button-3>", self.on_rclick)
         self.canvas.bind("<Configure>", lambda e: self.redraw())
+        self.root.after(120, self.redraw)      # 첫 화면 안내
         bar = ttk.Frame(lf)
         bar.pack(fill="x", pady=(4, 0))
         ttk.Checkbutton(bar, text="칸 경계", variable=self.showgrid,
@@ -430,6 +439,7 @@ class App:
             self.page_h = page.rect.height
             doc.close()
 
+            self.remember(path)
             self.shapes = core.extract_layout(path, pno, clip)
             n_r = sum(1 for s in self.shapes if s["k"] == "rect")
             n_l = sum(1 for s in self.shapes if s["k"] == "line")
@@ -692,7 +702,72 @@ class App:
         self._bg_key, self._bg_img = key, img
         return img
 
+    def welcome(self):
+        """PDF를 아직 안 골랐을 때 무엇을 해야 하는지 화면에 적는다.
+
+        처음 여는 사람은 빈 회색 화면을 보고 무엇부터 할지 모른다. 실제로
+        '테스트 어떻게 하냐, PDF가 없다'는 말을 들었다."""
+        cv = self.canvas
+        cv.delete("all")
+        cw = max(cv.winfo_width(), 300)
+        ch = max(cv.winfo_height(), 200)
+        cx = cw / 2
+        y = max(ch / 2 - 150, 30)
+        cv.create_text(cx, y, text="디자인이 끝난 교재 PDF를 여세요",
+                       font=("맑은 고딕", -22, "bold"), fill="#2b3a55")
+        y += 40
+        cv.create_text(cx, y, text="위쪽 찾아보기 를 누르거나, PDF 파일을 이 프로그램 위로 끌어다 놓으세요.",
+                       font=("맑은 고딕", -13), fill="#55617a")
+        y += 46
+        steps = [
+            "1.  PDF를 열면 문제 칸을 스스로 찾습니다. 잘못 잡히면 손으로 그리면 됩니다.",
+            "2.  칸을 누르고 오른쪽에 문제를 칩니다. 원고 파일을 불러올 수도 있습니다.",
+            "     빨리 보고 싶으면 전체 예시 를 누르세요. 칸이 한 번에 채워집니다.",
+            "3.  그래프나 그림은 그림 넣기 로 넣습니다. 아래 글이 알아서 밀립니다.",
+            "4.  Ctrl+P 를 누르면 인쇄용 PDF가 나오고 바로 열립니다.",
+        ]
+        for s in steps:
+            cv.create_text(cx - 250, y, text=s, anchor="w",
+                           font=("맑은 고딕", -13), fill="#3d4a63")
+            y += 30
+        y += 16
+        btn = cv.create_rectangle(cx - 92, y, cx + 92, y + 40,
+                                  fill="#2f6fd0", outline="", tags="pickbtn")
+        cv.create_text(cx, y + 20, text="교재 PDF 고르기", fill="#ffffff",
+                       font=("맑은 고딕", -14, "bold"), tags="pickbtn")
+        cv.tag_bind("pickbtn", "<Button-1>", lambda e: self.pick())
+        cv.config(cursor="")
+        if self.recent:
+            y += 58
+            cv.create_text(cx, y, text="최근에 연 파일", font=("맑은 고딕", -11), fill="#8892a6")
+            for i, p in enumerate(self.recent[:3]):
+                y += 24
+                t = cv.create_text(cx, y, text=os.path.basename(p),
+                                   font=("맑은 고딕", -12, "underline"), fill="#2f6fd0",
+                                   tags="recent%d" % i)
+                cv.tag_bind("recent%d" % i, "<Button-1>",
+                            lambda e, q=p: (self.pdf_path.set(q), self.analyze()))
+        self.status.config(text="PDF를 고르면 시작합니다")
+
+    def remember(self, path):
+        """방금 연 PDF를 기억한다. 다음에 열면 첫 화면에서 바로 고를 수 있다."""
+        if not path:
+            return
+        self.recent = [path] + [p for p in self.recent if p != path]
+        self.recent = self.recent[:5]
+        try:
+            json.dump({"recent": self.recent},
+                      open(os.path.join(core.work_dir(), "recent.json"), "w",
+                           encoding="utf-8"), ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
     def redraw(self):
+        p = self.pdf_path.get()
+        if not p or not os.path.exists(p) or not self.slots and not self.shapes:
+            if not p or not os.path.exists(p):
+                self.welcome()
+                return
         cv = self.canvas
         cv.delete("all")
         cw = max(cv.winfo_width(), 200)
@@ -1444,7 +1519,8 @@ class App:
                               fontpath=self.picked_font(),
                               base_size=self.bodysize.get(), lh=self.leading)
             info = pp.report(out)
-            self.say("인쇄용 PDF 저장: %s (%.1f KB)" % (out, info["bytes"] / 1024))
+            self.say("인쇄용 PDF를 만들었습니다.")
+            self.say("  %s  (%.0f KB)" % (out, info["bytes"] / 1024))
             self.say("  %.1f x %.1f mm, 이미지 %d개, 글자 %d자"
                      % (info["size_mm"][0], info["size_mm"][1], info["images"], info["chars"]))
             if info["images"] == 0:
