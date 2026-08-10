@@ -1,9 +1,8 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-chcp 65001 >nul
 
-echo [pdf2hwpx] exe ë¹Œë“œë¥¼ ì‹œìž‘í•©ë‹ˆë‹¤.
+echo [pdf2hwpx] exe ºôµå¸¦ ½ÃÀÛÇÕ´Ï´Ù.
 echo.
 
 where py >nul 2>nul
@@ -11,15 +10,15 @@ if %errorlevel%==0 (set PY=py -3) else (set PY=python)
 
 %PY% -m PyInstaller --version >nul 2>nul
 if errorlevel 1 (
-    echo PyInstallerê°€ ì—†ì–´ ì„¤ì¹˜í•©ë‹ˆë‹¤.
+    echo PyInstaller°¡ ¾ø¾î ¼³Ä¡ÇÕ´Ï´Ù.
     %PY% -m pip install pyinstaller
 )
 
-rem ì•ˆ ì“°ëŠ” ë¬´ê±°ìš´ ê²ƒë“¤ì„ ëº€ë‹¤. 115MBì—ì„œ 34MBë¡œ ì¤„ì–´ë“ ë‹¤.
-rem   lxml 7MB      XMLì€ ì •ê·œì‹ìœ¼ë¡œ ì²˜ë¦¬í•œë‹¤
-rem PILì€ ë¹¼ì§€ ë§ ê²ƒ. ë¯¸ë¦¬ë³´ê¸° ë°°ê²½ì„ PDFì—ì„œ êµ¬ì›Œ í™”ë©´ì— ì˜¬ë¦´ ë•Œ ì“´ë‹¤.
-rem   Pythonwin 7MB pywin32ì˜ MFC GUI ë¶€ë¶„. COMë§Œ ì“°ë¯€ë¡œ í•„ìš” ì—†ë‹¤
-rem setuptools, pip, unittest, pydocì€ ë¹¼ì§€ ë§ ê²ƒ. ë¹¼ë©´ exeê°€ ì¡°ìš©ížˆ ë©ˆì¶˜ë‹¤.
+rem ¾È ¾²´Â ¹«°Å¿î °ÍµéÀ» »«´Ù. 115MB¿¡¼­ 34MB·Î ÁÙ¾îµç´Ù.
+rem   lxml 7MB      XMLÀº Á¤±Ô½ÄÀ¸·Î Ã³¸®ÇÑ´Ù
+rem PILÀº »©Áö ¸» °Í. ¹Ì¸®º¸±â ¹è°æÀ» PDF¿¡¼­ ±¸¿ö È­¸é¿¡ ¿Ã¸± ¶§ ¾´´Ù.
+rem   Pythonwin 7MB pywin32ÀÇ MFC GUI ºÎºÐ. COM¸¸ ¾²¹Ç·Î ÇÊ¿ä ¾ø´Ù
+rem setuptools, pip, unittest, pydocÀº »©Áö ¸» °Í. »©¸é exe°¡ Á¶¿ëÈ÷ ¸ØÃá´Ù.
 %PY% -m PyInstaller --noconfirm --clean ^
   --onefile ^
   --noconsole ^
@@ -38,12 +37,12 @@ rem setuptools, pip, unittest, pydocì€ ë¹¼ì§€ ë§ ê²ƒ. ë¹¼ë©´ exeê°€ ì¡°ìš©ížˆ 
 
 if errorlevel 1 (
     echo.
-    echo ë¹Œë“œì— ì‹¤íŒ¨í–ˆìŠµë‹ˆë‹¤.
+    echo ºôµå¿¡ ½ÇÆÐÇß½À´Ï´Ù.
     pause
     exit /b 1
 )
 
 echo.
-echo ì™„ë£Œ. dist\pdf2hwpx.exe ë¥¼ ë”ë¸”í´ë¦­í•´ì„œ ì“°ì„¸ìš”.
+echo ¿Ï·á. dist\pdf2hwpx.exe ¸¦ ´õºíÅ¬¸¯ÇØ¼­ ¾²¼¼¿ä.
 dir /b dist
 pause

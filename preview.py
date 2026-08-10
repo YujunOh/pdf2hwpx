@@ -306,11 +306,15 @@ class EqLayout:
 _body_fonts = {}
 
 
-def body_font(px):
+BODY_FAMILY = "맑은 고딕"
+
+
+def body_font(px, family=""):
     size = -max(int(round(px)), 6)
-    if size not in _body_fonts:
-        _body_fonts[size] = tkfont.Font(family="맑은 고딕", size=size)
-    return _body_fonts[size]
+    key = (size, family or BODY_FAMILY)
+    if key not in _body_fonts:
+        _body_fonts[key] = tkfont.Font(family=key[1], size=size)
+    return _body_fonts[key]
 
 
 def render_parts(cv, parts, x, y, w, px=13, fill="#111111", tags=("body",), lh=1.55,
@@ -361,13 +365,24 @@ def render_parts(cv, parts, x, y, w, px=13, fill="#111111", tags=("body",), lh=1
         below = max([c[4] for c in ln], default=px * 0.24)
         base = cy + above
         cx = x
-        for kind, val, cwid, _, _ in ln:
-            if kind == "eq":
-                eq.draw(cv, val, cx, base, epx, fill, tags)
-                cx += cwid + 2
-            else:
-                cv.create_text(cx, base, text=val, anchor="sw", font=f, fill=fill, tags=tags)
-                cx += cwid
+        # 낱말을 하나씩 따로 그리면 낱말마다 반올림 오차가 붙어 자간이 벌어진다.
+        # 이어진 낱말은 한 문자열로 합쳐 한 번에 그린다. 그래야 폰트가 가진
+        # 커닝도 산다.
+        i = 0
+        while i < len(ln):
+            if ln[i][0] == "eq":
+                eq.draw(cv, ln[i][1], cx, base, epx, fill, tags)
+                cx += ln[i][2] + 2
+                i += 1
+                continue
+            j = i
+            buf = ""
+            while j < len(ln) and ln[j][0] == "t":
+                buf += ln[j][1]
+                j += 1
+            cv.create_text(cx, base, text=buf, anchor="sw", font=f, fill=fill, tags=tags)
+            cx += f.measure(buf)
+            i = j
         # 빈 줄도 한 줄 높이는 차지한다
         cy = base + max(below, px * (lh - 0.78))
     return cy

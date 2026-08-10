@@ -11,6 +11,7 @@
 칸에 완전히 덮인 벡터까지 지운다.
 """
 import os
+import re
 
 import fitz
 
@@ -23,12 +24,86 @@ MATH = r"C:\Windows\Fonts\times.ttf"
 MATH_I = r"C:\Windows\Fonts\timesi.ttf"
 
 
+def installed_fonts():
+    """설치된 한글 폰트를 {보여줄 이름: 파일경로} 로. 레지스트리에서 읽는다.
+
+    원본 PDF에서 폰트 이름을 읽을 수 없는 경우가 많다. PDFium을 거친 파일은
+    글자가 이름 없는 Type3로 들어와서 무슨 폰트였는지 알 길이 없다. 그래서
+    사람이 고르게 한다."""
+    out = {}
+    try:
+        import winreg
+    except ImportError:
+        return {"맑은 고딕": FALLBACK}
+    root = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+    user = os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Microsoft\Windows\Fonts")
+    for hive, sub in ((winreg.HKEY_LOCAL_MACHINE,
+                       r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"),
+                      (winreg.HKEY_CURRENT_USER,
+                       r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts")):
+        try:
+            k = winreg.OpenKey(hive, sub)
+        except OSError:
+            continue
+        i = 0
+        while True:
+            try:
+                name, val, _ = winreg.EnumValue(k, i)
+            except OSError:
+                break
+            i += 1
+            if not isinstance(val, str) or not val.lower().endswith((".ttf", ".otf")):
+                continue
+            path = val if os.path.isabs(val) else os.path.join(root, val)
+            if not os.path.exists(path) and user:
+                path = os.path.join(user, os.path.basename(val))
+            if not os.path.exists(path):
+                continue
+            # "맑은 고딕 (TrueType)" 에서 괄호를 뗀다
+            label = re.sub(r"\s*\((TrueType|OpenType)\)\s*$", "", name).strip()
+            out.setdefault(label, path)
+        winreg.CloseKey(k)
+    if not out:
+        out["맑은 고딕"] = FALLBACK
+    return out
+
+
+def korean_fonts():
+    """한글 글자가 실제로 들어 있는 것만 남긴다. 목록이 400개면 못 고른다."""
+    ok = {}
+    for label, path in installed_fonts().items():
+        try:
+            f = fitz.Font(fontfile=path)
+            if f.has_glyph(ord("한")) and f.has_glyph(ord("긿")):
+                ok[label] = path
+        except Exception:
+            continue
+    return ok
+
+
 def font_file(name=""):
-    """한글이 나오는 폰트를 고른다. 없으면 맑은 고딕."""
-    for p in (name, FALLBACK):
-        if p and os.path.exists(p):
-            return p
-    return None
+    """이름이나 경로로 폰트 파일을 찾는다. 못 찾으면 맑은 고딕."""
+    if name and os.path.exists(name):
+        return name
+    if name:
+        table = installed_fonts()
+        if name in table:
+            return table[name]
+        low = name.lower()
+        for label, path in table.items():
+            if label.lower() == low:
+                return path
+        # Tk는 "Pretendard" 로 부르는데 레지스트리에는 "Pretendard Regular" 로
+        # 들어 있다. 보통 굵기를 먼저 찾는다. 그냥 앞글자만 맞춰 고르면
+        # Black이 먼저 걸려서 본문이 새까맣게 나온다
+        for suffix in (" regular", " medium", " book", " light"):
+            for label, path in table.items():
+                if label.lower() == low + suffix:
+                    return path
+        for label, path in sorted(table.items()):
+            if label.lower().startswith(low + " "):
+                return path
+    return FALLBACK if os.path.exists(FALLBACK) else None
 
 
 def rgb(h):
@@ -104,7 +179,8 @@ def wipe(page, boxes):
                           graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED)
 
 
-def build(src_path, pageno, slots, parts_of, out_path, fontpath="", pad=3.0):
+def build(src_path, pageno, slots, parts_of, out_path, fontpath="", pad=3.0,
+          base_size=None, lh=1.55):
     """slots는 [(x, y, w, h)] pt 좌표, parts_of는 {슬롯번호: parts}.
 
     parts는 manuscript가 만드는 그 형식이다. {"t": 글}, {"eq": 수식}, {"br": True}.
@@ -127,6 +203,10 @@ def build(src_path, pageno, slots, parts_of, out_path, fontpath="", pad=3.0):
     np_.show_pdf_page(np_.rect, src, pageno)
 
     ff = font_file(fontpath)
+    steps = STEPS
+    if base_size:
+        # 고른 크기에서 시작해 필요한 만큼만 줄인다
+        steps = tuple(x for x in (base_size,) + STEPS if x <= base_size) or (base_size,)
     cv = PdfCanvas(np_)
     # 크기를 재 볼 곳. 같은 문서에 만들었다 지우면 페이지 참조가 무효가 된다
     scratch = fitz.open()
@@ -134,21 +214,21 @@ def build(src_path, pageno, slots, parts_of, out_path, fontpath="", pad=3.0):
     shrunk = []
     for i, rect in boxes.items():
         parts = parts_of[i]
-        for size in STEPS:
+        for size in steps:
             # 먼저 재 본다. 넘치면 그리지 않고 한 단계 줄인다
             end = pv.render_parts(probe, parts, rect.x0 + pad, rect.y0 + pad,
                                   rect.width - pad * 2, px=size,
-                                  mkfont=probe.mkfont,
+                                  mkfont=probe.mkfont, lh=lh,
                                   bodyfont=probe.font_for(ff, size))
             if end <= rect.y1 - pad:
                 break
         else:
-            size = STEPS[-1]
-        if size != STEPS[0]:
+            size = steps[-1]
+        if size != steps[0]:
             shrunk.append((i, size if end <= rect.y1 - pad else 0))
         pv.render_parts(cv, parts, rect.x0 + pad, rect.y0 + pad,
                         rect.width - pad * 2, px=size,
-                        mkfont=cv.mkfont, bodyfont=cv.font_for(ff, size))
+                        mkfont=cv.mkfont, lh=lh, bodyfont=cv.font_for(ff, size))
 
     cv.flush()
     # 서브셋을 안 걸면 맑은 고딕 한 벌이 통째로 들어가 9MB가 붙는다

@@ -39,6 +39,9 @@ OUTDIR = os.path.join(core.work_dir(), "out")
 os.makedirs(OUTDIR, exist_ok=True)
 
 DEFAULT_PDF = next((a for a in sys.argv[1:] if a.lower().endswith(".pdf")), "")
+# 작업 파일을 인자로 받는다. 배치 파일이 한글 경로를 다루지 않아도 되게 하려는
+# 것이다. cmd는 코드페이지에 따라 한글을 깨뜨리지만 dhp는 UTF-8 JSON이라 안전하다
+DEFAULT_PROJ = next((a for a in sys.argv[1:] if a.lower().endswith(".dhp")), "")
 
 MIN_W, MIN_H = 1180, 760
 
@@ -179,6 +182,9 @@ class App:
         self.zoomsel = tk.BooleanVar(value=False)
         self.striptext = tk.BooleanVar(value=True)
         self.showvec = tk.BooleanVar(value=False)
+        self.fontname = tk.StringVar(value="맑은 고딕")
+        self.bodysize = tk.DoubleVar(value=10.5)
+        self.leading = 1.55        # 원본에서 재서 덮어쓴다
         self._bg_key = None          # 배경 이미지 캐시. 같은 화면이면 다시 안 굽는다
         self._bg_img = None
         self._bg_photo = None
@@ -197,6 +203,8 @@ class App:
         self._text_boxes = []
         self.result_imgs = []
         self._build()
+        # 설치 폰트를 훑는 데 2초쯤 걸린다. 창을 띄운 뒤 뒤에서 채운다
+        threading.Thread(target=self._load_fonts, daemon=True).start()
 
     # ------------------------------------------------------------ 화면
     def _build(self):
@@ -237,6 +245,15 @@ class App:
                         command=self.redraw).pack(side="left")
         ttk.Checkbutton(bar, text="벡터 보기", variable=self.showvec,
                         command=self.redraw).pack(side="left", padx=8)
+        ttk.Label(bar, text=" 본문").pack(side="left")
+        self.fontbox = ttk.Combobox(bar, textvariable=self.fontname, width=15,
+                                    state="readonly", values=["맑은 고딕"])
+        self.fontbox.pack(side="left", padx=(2, 4))
+        self.fontbox.bind("<<ComboboxSelected>>", lambda e: self.redraw())
+        ttk.Spinbox(bar, from_=6.0, to=20.0, increment=0.5, width=5,
+                    textvariable=self.bodysize,
+                    command=self.redraw).pack(side="left")
+        ttk.Label(bar, text="pt").pack(side="left")
         self.status = ttk.Label(bar, text="", foreground="#555555")
         self.status.pack(side="right")
 
@@ -312,6 +329,23 @@ class App:
         # 미리보기가 절반 넘게 차지하도록 초기 분할 위치를 잡는다
         self.root.after(120, self._place_sash)
 
+    def _load_fonts(self):
+        """쓸 수 있는 한글 폰트를 목록에 채운다."""
+        try:
+            table = pp.korean_fonts()
+        except Exception:
+            return
+        names = sorted(table)
+        def apply():
+            self.fontbox["values"] = names
+            if self.fontname.get() not in names and names:
+                # 디자인 원본과 가장 비슷할 만한 것을 기본으로 고른다
+                for want in ("맑은 고딕", "Malgun Gothic", "Pretendard Regular"):
+                    if want in names:
+                        self.fontname.set(want); break
+            self.say("쓸 수 있는 한글 폰트 %d종을 찾았습니다." % len(names))
+        self.root.after(0, apply)
+
     def _place_sash(self):
         try:
             self.root.update_idletasks()
@@ -382,6 +416,11 @@ class App:
                 "%.0f x %.0f mm   사각형 %d · 직선 %d · 원본텍스트 %d\n"
                 "이미지 0개 (래스터화 없음)   검출된 문제 슬롯 %d개"
                 % (self.page_w * 25.4 / 72, self.page_h * 25.4 / 72, n_r, n_l, n_t, len(self.slots))))
+            m = self.measure_body()
+            if m:
+                self.bodysize.set(m[0]); self.leading = m[1]
+                self.say("원본 본문은 %.1fpt, 행간 %.2f 입니다. 그 값으로 맞췄습니다."
+                         % (m[0], m[1]))
             self.editor.delete("1.0", "end")
             self.editor.insert("1.0", self.texts.get(self.sel, ""))
             self.say("분석 완료. 사각형 %d, 직선 %d, 원본텍스트 %d, 슬롯 %d개"
@@ -391,6 +430,30 @@ class App:
             self.redraw()
         except Exception:
             self.say(traceback.format_exc())
+
+    def measure_body(self):
+        """칸 안에 있던 원본 글자에서 크기와 행간을 잰다.
+
+        디자이너가 정한 값을 그대로 따르는 것이 손으로 맞추는 것보다 낫다.
+        이 교재는 12pt에 행간 1.58이었는데 기본값 10.5pt로 넣으면 원본보다
+        작아서 한눈에 다르게 보인다."""
+        import statistics as st
+        sizes, gaps = [], []
+        for sx, sy, sw, sh in self.slots:
+            rows = [t for t in self.shapes if t["k"] == "text"
+                    and sx - 2 <= t["x"] <= sx + sw + 2
+                    and sy - 2 <= t["y"] <= sy + sh + 2]
+            rows.sort(key=lambda t: t["y"])
+            sizes += [t["size"] for t in rows]
+            for a, b in zip(rows, rows[1:]):
+                d = b["y"] - a["y"]
+                if 2 < d < 40:
+                    gaps.append(d)
+        if not sizes:
+            return None
+        size = round(st.median(sizes) * 2) / 2.0      # 0.5pt 단위로
+        lead = round(st.median(gaps) / st.median(sizes), 2) if gaps else 1.55
+        return size, max(min(lead, 2.4), 1.1)
 
     # ------------------------------------------------------------ 슬롯 검출
     def detect_slots(self):
@@ -695,9 +758,12 @@ class App:
                                    fill="#ffffff", font=("맑은 고딕", -fs, "bold"))
             txt = self.texts.get(i, "").strip()
             if txt:
-                px = max(int(10.5 * sc), 6)
-                end = pv.render_parts(cv, parse_markup(txt), X(x) + 4, Y(y) + 2 + (px * 0.2 if self.showgrid.get() else 0),
-                                      w * sc - 8, px=px, tags=("body", "s%d" % i))
+                px = max(int(self.bodysize.get() * sc), 6)
+                end = pv.render_parts(cv, parse_markup(txt), X(x) + 4,
+                                      Y(y) + 2 + (px * 0.2 if self.showgrid.get() else 0),
+                                      w * sc - 8, px=px, tags=("body", "s%d" % i),
+                                      lh=self.leading,
+                                      bodyfont=pv.body_font(px, self.fontname.get()))
                 if end > Y(y + h):
                     cv.create_rectangle(X(x), Y(y), X(x + w), Y(y + h),
                                         outline="#e05a4f", width=2, dash=(2, 2))
@@ -1030,6 +1096,8 @@ class App:
             "slots": [list(s) for s in self.slots],
             "texts": {str(k): v for k, v in self.texts.items()},
             "manuscript": getattr(self, "ms_path", ""),
+            "font": self.fontname.get(), "size": self.bodysize.get(),
+            "leading": self.leading,
         }
 
     def save_project(self):
@@ -1043,9 +1111,9 @@ class App:
         self.proj_path = p
         self.say("작업 저장: %s" % p)
 
-    def open_project(self):
-        p = filedialog.askopenfilename(title="작업 열기", initialdir=OUTDIR,
-                                       filetypes=[("조판 작업", "*.dhp")])
+    def open_project(self, path=""):
+        p = path or filedialog.askopenfilename(title="작업 열기", initialdir=OUTDIR,
+                                               filetypes=[("조판 작업", "*.dhp")])
         if not p:
             return
         try:
@@ -1055,6 +1123,9 @@ class App:
         self.pdf_path.set(d.get("pdf", ""))
         self.pageno.set(d.get("page", 1))
         self.side.set(d.get("side", "전체"))
+        saved_font = d.get("font", "")
+        saved_size = d.get("size", 0)
+        saved_lead = d.get("leading", 0)
         # 분석에 실패하면 직전 페이지의 도형이 남아 화면과 결과가 어긋난다
         self.shapes = []
         self._target = None
@@ -1063,6 +1134,15 @@ class App:
         else:
             self.say("PDF를 찾지 못했습니다: %s" % self.pdf_path.get())
             messagebox.showwarning("", "레이아웃 PDF를 찾지 못했습니다.\n경로를 다시 지정하고 분석하세요.")
+        # 저장해 둔 조판 값이 있으면 분석이 잰 값보다 그쪽을 따른다
+        if saved_font:
+            self.fontname.set(saved_font)
+            if saved_font not in (self.fontbox["values"] or ()):
+                self.fontbox["values"] = list(self.fontbox["values"] or ()) + [saved_font]
+        if saved_size:
+            self.bodysize.set(saved_size)
+        if saved_lead:
+            self.leading = saved_lead
         if not self.shapes:
             self.say("  도형이 없습니다. 이대로 만들면 글만 들어갑니다.")
         self.slots = [tuple(s) for s in d.get("slots", [])]
@@ -1227,7 +1307,7 @@ class App:
                     self.say("  슬롯%d 글자를 %.1fpt로 줄여 맞췄습니다." % (i, size))
                 if over:
                     self.say("  슬롯%d 는 9pt로도 넘칩니다. 문제를 줄이거나 칸을 키우세요." % i)
-                cp = table.get("맑은 고딕", False, size, "#1A1A1A")
+                cp = table.get(self.fontname.get(), False, size, "#1A1A1A")
                 inner = core.paras_from_parts(parts, char_pr=cp, width_hu=core.hu(w))
                 xml.append(core.rect_xml(x, y, w, h, fill=None, stroke=None, lw=0, z=z, inner=inner))
                 z += 1
@@ -1265,7 +1345,9 @@ class App:
                 return
             out = os.path.join(OUTDIR, "인쇄용.pdf")
             shrunk = pp.build(self.pdf_path.get(), self.pageno.get() - 1,
-                              self.slots, filled, out)
+                              self.slots, filled, out,
+                              fontpath=self.fontname.get(),
+                              base_size=self.bodysize.get(), lh=self.leading)
             info = pp.report(out)
             self.say("인쇄용 PDF 저장: %s (%.1f KB)" % (out, info["bytes"] / 1024))
             self.say("  %.1f x %.1f mm, 이미지 %d개, 글자 %d자"
@@ -1340,7 +1422,9 @@ if __name__ == "__main__":
     else:
         root = tk.Tk()
         app = App(root)
-        if DEFAULT_PDF:
+        if DEFAULT_PROJ and os.path.exists(DEFAULT_PROJ):
+            root.after(300, lambda: app.open_project(DEFAULT_PROJ))
+        elif DEFAULT_PDF:
             root.after(300, app.analyze)
         if "--demo" in sys.argv:
             def run():
