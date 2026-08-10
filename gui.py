@@ -499,14 +499,28 @@ class App:
         if not messagebox.askyesno("여러 쪽 만들기", msg):
             return
 
-        jobs = []
+        # 쪽마다 칸 모양이 다른 교재가 흔하다. 기본은 쪽마다 다시 찾는 것으로
+        # 두고, 같은 판형이 반복되는 교재면 지금 배치를 그대로 쓰게 한다
+        redetect = messagebox.askyesno(
+            "칸 찾기",
+            "쪽마다 칸을 다시 찾을까요?\n\n"
+            "예 - 쪽마다 그 쪽의 칸을 찾습니다. 쪽 구성이 다른 교재에 맞습니다.\n"
+            "아니오 - 지금 칸 배치를 모든 쪽에 그대로 씁니다.")
+
+        jobs, taken = [], 0
         for k in range(pages):
-            chunk = self.problems[k * per:(k + 1) * per]
+            pno = start - 1 + k
+            slots = self.slots
+            if redetect and k:
+                slots = self.slots_of_page(pno) or self.slots
+            chunk = self.problems[taken:taken + len(slots)]
+            if not chunk:
+                break
+            taken += len(chunk)
             parts_of = {}
             for i, prob in enumerate(chunk):
                 parts_of[i] = parse_markup(ms.parts_to_markup(prob["parts"]))
-            if parts_of:
-                jobs.append((start - 1 + k, self.slots, parts_of))
+            jobs.append((pno, slots, parts_of))
         out = os.path.join(OUTDIR, "교재.pdf")
         try:
             rep = pp.build_book(self.pdf_path.get(), jobs, out,
@@ -653,6 +667,30 @@ class App:
         return size, max(min(lead, 2.4), 1.1)
 
     # ------------------------------------------------------------ 슬롯 검출
+    def slots_of_page(self, pageno):
+        """다른 쪽의 칸을 찾아 온다. 화면 상태는 건드리지 않는다.
+
+        여러 쪽을 한 번에 뽑을 때 쪽마다 칸 모양이 다를 수 있다."""
+        keep = (self.shapes, self._text_boxes, self.page_w, self.page_h)
+        try:
+            doc = fitz.open(self.pdf_path.get())
+            if pageno >= doc.page_count:
+                doc.close(); return []
+            page = doc[pageno]
+            clip = self.clip_of(page)
+            self.page_w = (clip[2] - clip[0]) if clip else page.rect.width
+            self.page_h = page.rect.height
+            doc.close()
+            self.shapes = core.extract_layout(self.pdf_path.get(), pageno, clip)
+            self._text_boxes = [(t["x"], t["y"], t["x"] + t["w"], t["y"] + t["h"])
+                                for t in self.shapes if t["k"] == "text"]
+            return self.detect_slots()
+        except Exception:
+            self.say(traceback.format_exc())
+            return []
+        finally:
+            self.shapes, self._text_boxes, self.page_w, self.page_h = keep
+
     def detect_slots(self):
         """두 가지 패턴을 다 시도해서 많이 잡히는 쪽을 쓴다.
         (a) 문제마다 색 띠 헤더가 있고 그 아래가 본문인 배치
