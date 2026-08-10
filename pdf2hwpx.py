@@ -61,15 +61,19 @@ def extract_layout(pdf_path, pageno, clip=None):
         fill = rgb(g.get("fill"))
         stroke = rgb(g.get("color"))
         lw = g.get("width") or 0
-        # 곡선이 섞인 path는 통째로 curve로 옮긴다. 쪼개면 모양이 무너진다.
-        if any(it[0] == "c" for it in g["items"]):
+        # 곡선이 섞이거나 선분이 여러 개인 path는 통째로 curve로 옮긴다.
+        # 쪼개면 모양이 무너지고, 선 하나마다 도형을 만들면 파일이 폭발한다.
+        # 실제 디자인 PDF의 한 페이지에 선분이 2480개 들어 있었다.
+        n_line = sum(1 for it in g["items"] if it[0] == "l")
+        if any(it[0] == "c" for it in g["items"]) or n_line >= 3:
             r = g["rect"]
             if clip and not inside(r.x0, r.x1):
                 continue
-            pts = [(px - ox, py - oy) for px, py in flatten_path(g["items"])]
-            if len(pts) >= 2:
-                out.append({"k": "curve", "pts": pts, "fill": fill, "stroke": stroke,
-                            "lw": lw, "close": bool(g.get("closePath"))})
+            for sub in flatten_path(g["items"]):
+                pts = [(px - ox, py - oy) for px, py in sub]
+                if len(pts) >= 2:
+                    out.append({"k": "curve", "pts": pts, "fill": fill, "stroke": stroke,
+                                "lw": lw, "close": bool(g.get("closePath"))})
             continue
         for it in g["items"]:
             if it[0] == "re":
@@ -180,36 +184,61 @@ def rect_xml(x, y, w, h, fill=None, stroke=None, lw=0, ratio=0, z=0, inner=None)
            W, W, H, H, W, H, _pos(x, y)))
 
 
-def flatten_path(items, steps=12):
+def flatten_path(items, tol=0.35, max_steps=14):
     """PDF path를 점 목록으로 편다. 3차 베지어는 직선으로 쪼갠다.
-    HWPX의 <hp:seg>에는 제어점이 없어서 근사가 불가피하다."""
-    pts = []
+    HWPX의 <hp:seg>에는 제어점이 없어서 근사가 불가피하다.
+
+    분할 수는 곡선 크기에 맞춘다. 전부 12등분하면 실제 디자인 PDF에서
+    점이 7만개까지 불어나 파일도 화면도 못 쓰게 된다. 작은 곡선은 두
+    조각이면 충분하고 눈으로 구분되지 않는다."""
+    subs, pts = [], []
+
+    def flush():
+        if len(pts) >= 2:
+            subs.append(list(pts))
+        del pts[:]
+
+    def start(p):
+        # 이전 조각의 끝과 떨어져 있으면 새 갈래다. 이어 붙이면 없던 선이 생긴다
+        if pts and (abs(pts[-1][0] - p[0]) > 1.0 or abs(pts[-1][1] - p[1]) > 1.0):
+            flush()
+        push(p)
 
     def push(p):
-        if not pts or abs(pts[-1][0] - p[0]) > 0.01 or abs(pts[-1][1] - p[1]) > 0.01:
+        if not pts or abs(pts[-1][0] - p[0]) > tol or abs(pts[-1][1] - p[1]) > tol:
             pts.append((p[0], p[1]))
 
     for it in items:
         if it[0] == "l":
-            push((it[1].x, it[1].y)); push((it[2].x, it[2].y))
+            start((it[1].x, it[1].y)); push((it[2].x, it[2].y))
         elif it[0] == "c":
             p0, p1, p2, p3 = it[1], it[2], it[3], it[4]
-            push((p0.x, p0.y))
+            start((p0.x, p0.y))
+            # 제어 다각형 길이로 곡선 크기를 가늠한다
+            d = (abs(p1.x - p0.x) + abs(p1.y - p0.y) +
+                 abs(p2.x - p1.x) + abs(p2.y - p1.y) +
+                 abs(p3.x - p2.x) + abs(p3.y - p2.y))
+            steps = max(2, min(int((d / max(tol, 0.05)) ** 0.5), max_steps))
             for s in range(1, steps + 1):
                 t = s / float(steps)
                 u = 1.0 - t
-                a, b, c, d = u * u * u, 3 * u * u * t, 3 * u * t * t, t * t * t
-                push((a * p0.x + b * p1.x + c * p2.x + d * p3.x,
-                      a * p0.y + b * p1.y + c * p2.y + d * p3.y))
+                a, b, c, d2 = u * u * u, 3 * u * u * t, 3 * u * t * t, t * t * t
+                push((a * p0.x + b * p1.x + c * p2.x + d2 * p3.x,
+                      a * p0.y + b * p1.y + c * p2.y + d2 * p3.y))
         elif it[0] == "re":
+            flush()
             r = it[1]
             for p in ((r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1), (r.x0, r.y0)):
                 push(p)
+            flush()
         elif it[0] == "qu":
+            flush()
             q = it[1]
             for p in (q.ul, q.ur, q.lr, q.ll, q.ul):
                 push((p.x, p.y))
-    return pts
+            flush()
+    flush()
+    return subs
 
 
 def curve_xml(pts, fill=None, stroke=None, lw=0, close=False, z=0):

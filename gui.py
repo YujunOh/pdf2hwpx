@@ -480,9 +480,18 @@ class App:
                         cv.create_line(flat, fill=s["stroke"] or "#000000",
                                        width=max((s["lw"] or 0.5) * sc, 1))
             else:
-                px = max(int(s["size"] * sc), 5)
-                cv.create_text(X(s["x"]), Y(s["y"] + s["h"]), text=s["s"], anchor="sw",
-                               font=("맑은 고딕", -px), fill=s.get("color") or "#000000")
+                # 맑은고딕은 실제 높이가 요청 크기의 1.36배라 원본 크기 그대로
+                # 그리면 줄 간격을 넘어 윗줄과 겹친다
+                fpx = s["size"] * sc * 0.78
+                if fpx < 5.0:
+                    # 이 배율에서 읽을 수 없는 크기다. 억지로 키우면 줄끼리 겹친다
+                    cv.create_rectangle(X(s["x"]), Y(s["y"]) + 1,
+                                        X(s["x"] + s["w"]), Y(s["y"] + s["h"]) - 1,
+                                        fill="#c9ccd4", outline="")
+                else:
+                    cv.create_text(X(s["x"]), Y(s["y"] + s["h"]), text=s["s"], anchor="sw",
+                                   font=("맑은 고딕", -int(round(fpx))),
+                                   fill=s.get("color") or "#000000")
 
         # 슬롯 경계와 입력 내용
         for i, (x, y, w, h) in enumerate(self.slots):
