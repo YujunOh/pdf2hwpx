@@ -147,16 +147,25 @@ EQ_TRAPS = [
 ]
 
 
+IMG_RE = re.compile(r"\[\[img:([^\]|]+?)(?:\|(\d{1,3}))?\]\]")
+
+
 def parse_markup(text):
-    """달러 기호 사이는 수식, 줄바꿈은 br."""
+    """달러 기호 사이는 수식, 줄바꿈은 br, [[img:경로]] 는 그림.
+
+    그림 뒤에 |70 처럼 적으면 칸 폭의 70%로 넣는다. 안 적으면 칸 폭에 맞춘다."""
     parts = []
     for i, line in enumerate(text.split("\n")):
         if i:
             parts.append({"br": True})
-        for tok in re.split(r"(\$[^$]*\$)", line):
+        for tok in re.split(r"(\$[^$]*\$|\[\[img:[^\]]*\]\])", line):
             if not tok:
                 continue
-            if tok.startswith("$") and tok.endswith("$") and len(tok) > 1:
+            m = IMG_RE.fullmatch(tok)
+            if m:
+                parts.append({"img": m.group(1).strip(),
+                              "pct": int(m.group(2)) if m.group(2) else 100})
+            elif tok.startswith("$") and tok.endswith("$") and len(tok) > 1:
                 parts.append({"eq": tok[1:-1]})
             else:
                 parts.append({"t": tok})
@@ -171,7 +180,13 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("ditda 교재 자동조판 실습")
-        root.geometry("%dx%d" % (MIN_W + 220, MIN_H + 120))
+        # 고정 크기로 열면 화면이 작을 때 오른쪽 칸이 잘려 안 보인다.
+        # 화면에 맞춰 열고 가운데에 둔다
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        w = max(MIN_W, min(int(sw * 0.88), 1720))
+        h = max(MIN_H, min(int(sh * 0.88), 1040))
+        root.geometry("%dx%d+%d+%d" % (w, h, max((sw - w) // 2, 0),
+                                       max((sh - h) // 2 - 16, 0)))
         # 버튼이 가려질 만큼 줄어들지 않게 막는다
         root.minsize(MIN_W, MIN_H)
 
@@ -188,6 +203,8 @@ class App:
         self._bg_key = None          # 배경 이미지 캐시. 같은 화면이면 다시 안 굽는다
         self._bg_img = None
         self._bg_photo = None
+        self._photos = {}    # 미리보기에 그린 자료 그림
+        self.bad_fonts = set()
         self.shapes, self.slots, self.texts = [], [], {}
         self.sel = 0
         self.page_w, self.page_h = 595.276, 841.89
@@ -237,25 +254,29 @@ class App:
         self.canvas.bind("<Configure>", lambda e: self.redraw())
         bar = ttk.Frame(lf)
         bar.pack(fill="x", pady=(4, 0))
-        ttk.Checkbutton(bar, text="슬롯 경계", variable=self.showgrid,
+        ttk.Checkbutton(bar, text="칸 경계", variable=self.showgrid,
                         command=self.redraw).pack(side="left")
-        ttk.Checkbutton(bar, text="선택 슬롯 확대", variable=self.zoomsel,
-                        command=self.redraw).pack(side="left", padx=8)
-        ttk.Checkbutton(bar, text="칸 안 원본 글자 빼기", variable=self.striptext,
+        ttk.Checkbutton(bar, text="확대", variable=self.zoomsel,
+                        command=self.redraw).pack(side="left", padx=6)
+        ttk.Checkbutton(bar, text="원본 글자 빼기", variable=self.striptext,
                         command=self.redraw).pack(side="left")
-        ttk.Checkbutton(bar, text="벡터 보기", variable=self.showvec,
-                        command=self.redraw).pack(side="left", padx=8)
-        ttk.Label(bar, text=" 본문").pack(side="left")
-        self.fontbox = ttk.Combobox(bar, textvariable=self.fontname, width=15,
-                                    state="readonly", values=["맑은 고딕"])
-        self.fontbox.pack(side="left", padx=(2, 4))
-        self.fontbox.bind("<<ComboboxSelected>>", lambda e: self.redraw())
-        ttk.Spinbox(bar, from_=6.0, to=20.0, increment=0.5, width=5,
-                    textvariable=self.bodysize,
-                    command=self.redraw).pack(side="left")
-        ttk.Label(bar, text="pt").pack(side="left")
+        ttk.Checkbutton(bar, text="벡터", variable=self.showvec,
+                        command=self.redraw).pack(side="left", padx=6)
         self.status = ttk.Label(bar, text="", foreground="#555555")
         self.status.pack(side="right")
+
+        bar2 = ttk.Frame(lf)
+        bar2.pack(fill="x", pady=(2, 0))
+        ttk.Label(bar2, text="본문").pack(side="left")
+        self.fontbox = ttk.Combobox(bar2, textvariable=self.fontname, width=17,
+                                    state="readonly", values=["맑은 고딕"])
+        self.fontbox.pack(side="left", padx=(4, 4))
+        self.fontbox.bind("<<ComboboxSelected>>", lambda e: self.redraw())
+        ttk.Spinbox(bar2, from_=6.0, to=20.0, increment=0.5, width=5,
+                    textvariable=self.bodysize,
+                    command=self.redraw).pack(side="left")
+        ttk.Label(bar2, text="pt").pack(side="left", padx=(2, 10))
+        ttk.Button(bar2, text="그림 넣기", command=self.insert_image).pack(side="left")
 
         # --- 오른쪽: 편집
         rf = ttk.Frame(pane)
@@ -330,21 +351,35 @@ class App:
         self.root.after(120, self._place_sash)
 
     def _load_fonts(self):
-        """쓸 수 있는 한글 폰트를 목록에 채운다."""
+        """쓸 수 있는 한글 폰트를 목록에 채운다.
+
+        글자가 제대로 안 나오는 폰트는 이름 뒤에 표를 달아 둔다. OTF 폰트
+        가운데 %가 엉뚱한 모양으로 그려지거나 원문자를 복사하면 다른 글자가
+        나오는 것들이 있다."""
         try:
             table = pp.korean_fonts()
         except Exception:
             return
-        names = sorted(table)
+        good = sorted(n for n, v in table.items() if v[1])
+        bad = sorted(n for n, v in table.items() if not v[1])
+        self.bad_fonts = set(bad)
+        names = good + [n + " △" for n in bad]
+
         def apply():
             self.fontbox["values"] = names
             if self.fontname.get() not in names and names:
-                # 디자인 원본과 가장 비슷할 만한 것을 기본으로 고른다
-                for want in ("맑은 고딕", "Malgun Gothic", "Pretendard Regular"):
+                for want in ("맑은 고딕", "Malgun Gothic"):
                     if want in names:
                         self.fontname.set(want); break
-            self.say("쓸 수 있는 한글 폰트 %d종을 찾았습니다." % len(names))
+            self.say("한글 폰트 %d종. 그 중 %d종은 글자가 어긋나 △ 를 달았습니다."
+                     % (len(names), len(bad)))
+            if bad:
+                self.say("  △ 폰트는 %% 나 원문자가 다르게 나올 수 있습니다.")
         self.root.after(0, apply)
+
+    def picked_font(self):
+        """콤보에서 고른 이름에서 표를 뗀다."""
+        return self.fontname.get().replace(" △", "")
 
     def _place_sash(self):
         try:
@@ -758,12 +793,15 @@ class App:
                                    fill="#ffffff", font=("맑은 고딕", -fs, "bold"))
             txt = self.texts.get(i, "").strip()
             if txt:
+                parts = parse_markup(txt)
                 px = max(int(self.bodysize.get() * sc), 6)
-                end = pv.render_parts(cv, parse_markup(txt), X(x) + 4,
+                _, iscale = self.fit_size(parts, w, h)
+                end = pv.render_parts(cv, parts, X(x) + 4,
                                       Y(y) + 2 + (px * 0.2 if self.showgrid.get() else 0),
                                       w * sc - 8, px=px, tags=("body", "s%d" % i),
-                                      lh=self.leading,
-                                      bodyfont=pv.body_font(px, self.fontname.get()))
+                                      lh=self.leading, iscale=iscale,
+                                      drawimg=self.draw_image,
+                                      bodyfont=pv.body_font(px, self.picked_font()))
                 if end > Y(y + h):
                     cv.create_rectangle(X(x), Y(y), X(x + w), Y(y + h),
                                         outline="#e05a4f", width=2, dash=(2, 2))
@@ -973,14 +1011,20 @@ class App:
             ("3. 선생님 원고 불러오기",
              "hwp, hwpx, txt를 읽어 문항과 수식을 뽑습니다. 목록에서 두 번 누르면\n"
              "고른 칸에 들어가고, 순서대로 채우기를 누르면 한 번에 배분됩니다."),
-            ("4. 손질하기",
+            ("4. 자료 그림 넣기",
+             "그래프나 실험 그림을 넣습니다. 미리보기 아래 '그림 넣기' 를 누르면\n"
+             "커서 자리에 들어가고 아래 글이 자동으로 밀립니다. 칸을 넘치면\n"
+             "그림을 먼저 줄이고, 그래도 안 되면 글자를 줄입니다. 글자 크기는\n"
+             "교재 전체가 같아야 하므로 마지막에 손댑니다.\n"
+             "[[img:경로|70]] 처럼 뒤에 숫자를 적으면 칸 폭의 70%로 넣습니다."),
+            ("5. 손질하기",
              "달러 기호 사이가 수식입니다. 타이핑하는 동안 왼쪽이 바로 갱신됩니다.\n"
              "칸보다 글이 길면 글자를 줄여 맞추고, 그래도 넘치면 알려 줍니다."),
-            ("5. 인쇄용 PDF (Ctrl+P)",
+            ("6. 인쇄용 PDF (Ctrl+P)",
              "인쇄소에 그대로 내는 파일입니다. 원본 디자인을 뜯지 않고 통째로 깐 뒤\n"
              "글만 얹으므로 화질 손실이 0입니다. 굽는 단계가 없어 dpi를 고를 일도\n"
              "없고, 원본의 색과 폰트와 투명도가 그대로 남습니다."),
-            ("6. HWPX 만들기 (Ctrl+B)",
+            ("7. HWPX 만들기 (Ctrl+B)",
              "강사가 한글에서 열어 고칠 파일입니다. 원고를 손볼 사람에게 넘길 때\n"
              "씁니다. 한글로 열어 확인을 누르면 실제로 열어 PDF로 뽑아 보여줍니다."),
         ]
@@ -1242,6 +1286,40 @@ class App:
         self.redraw()
         self.say("슬롯 %d개에 예시를 넣었습니다." % len(self.slots))
 
+    def insert_image(self):
+        """자료 그림을 커서 자리에 넣는다. 그래프나 실험 그림처럼 과학 문제에
+        꼭 붙는 것들이다. 넣으면 아래 글이 자동으로 밀린다."""
+        p = filedialog.askopenfilename(
+            title="자료 그림 고르기",
+            filetypes=[("그림", "*.png *.jpg *.jpeg *.gif *.bmp *.webp")])
+        if not p:
+            return
+        at = self.editor.index("insert")
+        # 그림은 한 줄을 통째로 쓴다. 쓰던 줄 중간이면 줄을 먼저 바꿔 준다
+        head = self.editor.get("insert linestart", "insert")
+        pre = "\n" if head.strip() else ""
+        self.editor.insert(at, pre + "[[img:%s]]\n" % p)
+        self.on_type()
+
+    def draw_image(self, x, y, w, h, path, tags=()):
+        """미리보기에 그림을 그린다. 화면 배율에 맞춰 그때그때 줄인다."""
+        if Image is None:
+            return
+        key = (path, int(w), int(h))
+        photo = self._photos.get(key)
+        if photo is None:
+            try:
+                with Image.open(path) as im:
+                    im = im.convert("RGB")
+                    im = im.resize((max(int(w), 1), max(int(h), 1)), Image.LANCZOS)
+                    photo = ImageTk.PhotoImage(im)
+            except Exception:
+                return
+            if len(self._photos) > 60:
+                self._photos.clear()
+            self._photos[key] = photo
+        self.canvas.create_image(x, y, image=photo, anchor="nw", tags=tags)
+
     def clear_slot(self):
         self.texts[self.sel] = ""
         self.editor.delete("1.0", "end")
@@ -1249,15 +1327,32 @@ class App:
 
     # ------------------------------------------------------------ 생성
     def fit_size(self, parts, w_pt, h_pt):
-        """칸에 들어가는 가장 큰 글자 크기를 찾는다. 임의로 잘라내지는 않는다."""
+        """칸에 들어가는 (글자 크기, 그림 배율). 그림을 먼저 줄인다.
+
+        글자 크기는 교재 전체가 같아야 눈에 거슬리지 않는다. 자료 그림이
+        붙는 과학 문제에서 이 순서가 중요하다."""
+        base = self.bodysize.get()
+        steps = tuple(x for x in (base,) + pp.STEPS if x <= base) or (base,)
+        has_img = any("img" in p for p in parts)
         cv = tk.Canvas(self.root)          # 화면에 붙이지 않는 측정용
         try:
-            for size in (10.5, 10.0, 9.5, 9.0):
+            def end_at(size, iscale):
                 cv.delete("all")
-                end = pv.render_parts(cv, parts, 0, 0, w_pt - 8, px=size)
-                if end <= h_pt - 6:
-                    return size, False
-            return 9.0, True
+                return pv.render_parts(cv, parts, 0, 0, w_pt - 8, px=size,
+                                       lh=self.leading, iscale=iscale,
+                                       bodyfont=pv.body_font(size, self.picked_font()))
+            limit = h_pt - 6
+            if end_at(steps[0], 1.0) <= limit:
+                return steps[0], 1.0
+            if has_img:
+                for iscale in pp.IMG_STEPS[1:]:
+                    if end_at(steps[0], iscale) <= limit:
+                        return steps[0], iscale
+            small = pp.IMG_STEPS[-1] if has_img else 1.0
+            for size in steps[1:]:
+                if end_at(size, small) <= limit:
+                    return size, small
+            return steps[-1], small
         finally:
             cv.destroy()
 
@@ -1302,12 +1397,12 @@ class App:
                     continue
                 parts = parse_markup(txt)
                 n_eq += count_eq(parts)
-                size, over = self.fit_size(parts, w, h)
-                if size < 10.5:
+                size, iscale = self.fit_size(parts, w, h)
+                if iscale < 1.0:
+                    self.say("  슬롯%d 그림을 %d%%로 줄여 맞췄습니다." % (i, iscale * 100))
+                if size < self.bodysize.get():
                     self.say("  슬롯%d 글자를 %.1fpt로 줄여 맞췄습니다." % (i, size))
-                if over:
-                    self.say("  슬롯%d 는 9pt로도 넘칩니다. 문제를 줄이거나 칸을 키우세요." % i)
-                cp = table.get(self.fontname.get(), False, size, "#1A1A1A")
+                cp = table.get(self.picked_font(), False, size, "#1A1A1A")
                 inner = core.paras_from_parts(parts, char_pr=cp, width_hu=core.hu(w))
                 xml.append(core.rect_xml(x, y, w, h, fill=None, stroke=None, lw=0, z=z, inner=inner))
                 z += 1
@@ -1346,7 +1441,7 @@ class App:
             out = os.path.join(OUTDIR, "인쇄용.pdf")
             shrunk = pp.build(self.pdf_path.get(), self.pageno.get() - 1,
                               self.slots, filled, out,
-                              fontpath=self.fontname.get(),
+                              fontpath=self.picked_font(),
                               base_size=self.bodysize.get(), lh=self.leading)
             info = pp.report(out)
             self.say("인쇄용 PDF 저장: %s (%.1f KB)" % (out, info["bytes"] / 1024))
@@ -1354,12 +1449,14 @@ class App:
                      % (info["size_mm"][0], info["size_mm"][1], info["images"], info["chars"]))
             if info["images"] == 0:
                 self.say("  이미지 0개. 원본 디자인이 벡터 그대로 들어갔습니다.")
-            for i, size in shrunk:
-                if size:
-                    self.say("  슬롯%d 글자를 %.1fpt로 줄여 맞췄습니다." % (i, size))
-                else:
-                    self.say("  슬롯%d 는 %.1fpt로도 넘칩니다. 문제를 줄이거나 칸을 키우세요."
-                             % (i, pp.STEPS[-1]))
+            for i, size, iscale in shrunk:
+                bits = []
+                if iscale < 1.0:
+                    bits.append("그림 %d%%" % (iscale * 100))
+                if size < self.bodysize.get():
+                    bits.append("글자 %.1fpt" % size)
+                if bits:
+                    self.say("  슬롯%d 를 %s 로 줄여 맞췄습니다." % (i, ", ".join(bits)))
             os.startfile(out)
         except Exception:
             self.say(traceback.format_exc())

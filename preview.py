@@ -317,8 +317,23 @@ def body_font(px, family=""):
     return _body_fonts[key]
 
 
+_img_size = {}
+
+
+def image_size(path):
+    """그림의 가로세로 픽셀. 매번 파일을 열면 타이핑할 때마다 느려진다."""
+    if path not in _img_size:
+        try:
+            from PIL import Image
+            with Image.open(path) as im:
+                _img_size[path] = im.size
+        except Exception:
+            _img_size[path] = (0, 0)
+    return _img_size[path]
+
+
 def render_parts(cv, parts, x, y, w, px=13, fill="#111111", tags=("body",), lh=1.55,
-                 mkfont=None, bodyfont=None):
+                 mkfont=None, bodyfont=None, drawimg=None, iscale=1.0):
     """텍스트와 수식이 섞인 parts를 캔버스에 흘려 그린다. 마지막 아래끝을 반환.
 
     줄을 먼저 짠 다음 그린다. 그리면서 baseline을 조정하면 키 큰 수식이
@@ -342,6 +357,24 @@ def render_parts(cv, parts, x, y, w, px=13, fill="#111111", tags=("body",), lh=1
         if p.get("br"):
             wrap()
             continue
+        if "img" in p:
+            # 그림은 한 줄을 통째로 쓴다. 폭은 칸에 맞추고 높이는 비율대로.
+            # 원본보다 크게 늘리지는 않는다. 늘리면 화면에서만 커 보이고
+            # 인쇄하면 흐려진다
+            iw, ih = image_size(p["img"])
+            if iw <= 0:
+                continue
+            # 칸 폭을 꽉 채우면 좌우 여백이 없어 답답하다. 디자인에서 자료는
+            # 보통 본문보다 조금 좁다
+            want = w * min(max(p.get("pct", 88), 5), 100) / 100.0 * iscale
+            nat = iw * 72.0 / 96.0            # 화면 해상도 기준으로 pt 환산
+            dw = min(want, nat) if nat > 0 else want
+            dh = dw * ih / float(iw)
+            if cur:
+                wrap()
+            cur.append(("img", p["img"], dw, dh, 0.0))
+            wrap()
+            continue
         if "eq" in p:
             node = parse_script(p["eq"])
             ew, ea, eb = eq.measure(node, epx)
@@ -361,6 +394,13 @@ def render_parts(cv, parts, x, y, w, px=13, fill="#111111", tags=("body",), lh=1
     # 2) 줄마다 높이를 재서 그린다
     cy = y
     for ln in lines:
+        if ln and ln[0][0] == "img":
+            _, path, dw, dh, _ = ln[0]
+            if drawimg is not None:
+                # 칸 가운데에 놓는다. 왼쪽에 붙이면 그래프가 한쪽으로 쏠려 보인다
+                drawimg(x + max((w - dw) / 2.0, 0), cy, dw, dh, path, tags)
+            cy += dh + px * 0.35
+            continue
         above = max([c[3] for c in ln], default=px * 0.78)
         below = max([c[4] for c in ln], default=px * 0.24)
         base = cy + above

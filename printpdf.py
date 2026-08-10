@@ -68,14 +68,40 @@ def installed_fonts():
     return out
 
 
+# 교재에 실제로 나오는 글자들. 이게 어긋나면 인쇄물이 틀린다
+PROBE = "60% ± ≥ ① ② ㈜ ℃ ㎡"
+
+
+def glyphs_ok(path):
+    """이 폰트로 쓴 글자가 제대로 나오는지 실제로 한 장 찍어 확인한다.
+
+    OTF(CFF) 폰트에서 PyMuPDF의 글리프 매핑이 어긋나는 경우가 있다.
+    Pretendard로 %를 쓰면 검은 Y 배지가 그려지고, 원문자 ①은 보기에는
+    멀쩡한데 복사하면 ➀ 이 나온다. has_glyph만 봐서는 안 걸린다."""
+    try:
+        doc = fitz.open()
+        page = doc.new_page()
+        tw = fitz.TextWriter(page.rect)
+        tw.append(fitz.Point(20, 50), PROBE, font=fitz.Font(fontfile=path), fontsize=14)
+        tw.write_text(page)
+        got = doc.tobytes()
+        doc.close()
+        chk = fitz.open("pdf", got)
+        back = chk[0].get_text().strip().replace(" ", " ")
+        chk.close()
+        return back == PROBE
+    except Exception:
+        return False
+
+
 def korean_fonts():
-    """한글 글자가 실제로 들어 있는 것만 남긴다. 목록이 400개면 못 고른다."""
+    """쓸 수 있는 한글 폰트. {이름: (경로, 글자가 제대로 나오는가)}"""
     ok = {}
     for label, path in installed_fonts().items():
         try:
             f = fitz.Font(fontfile=path)
             if f.has_glyph(ord("한")) and f.has_glyph(ord("긿")):
-                ok[label] = path
+                ok[label] = (path, glyphs_ok(path))
         except Exception:
             continue
     return ok
@@ -163,6 +189,14 @@ class PdfCanvas:
         self.page.draw_line(fitz.Point(x1, y1), fitz.Point(x2, y2),
                             color=rgb(fill), width=width)
 
+    def drawimg(self, x, y, w, h, path, tags=()):
+        """자료 그림. 원본 스트림을 그대로 넣는다. 다시 굽지 않는다."""
+        try:
+            self.page.insert_image(fitz.Rect(x, y, x + w, y + h), filename=path,
+                                   keep_proportion=True)
+        except Exception:
+            pass
+
     def flush(self):
         for color, tw in self._tw.items():
             tw.write_text(self.page, color=rgb(color))
@@ -179,7 +213,38 @@ def wipe(page, boxes):
                           graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED)
 
 
-def build(src_path, pageno, slots, parts_of, out_path, fontpath="", pad=3.0,
+IMG_STEPS = (1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.42)
+
+
+def fit(probe, parts, rect, ff, steps, lh, pad):
+    """칸에 들어가는 (글자 크기, 그림 배율)을 찾는다.
+
+    그림을 먼저 줄인다. 글자 크기는 교재 전체가 같아야 눈에 거슬리지 않으므로
+    마지막에 손댄다. 자료 그림이 있는 과학 문제에서 이 순서가 중요하다."""
+    limit = rect.y1 - pad
+    has_img = any("img" in p for p in parts)
+
+    def end_at(size, iscale):
+        return pv.render_parts(probe, parts, rect.x0 + pad, rect.y0 + pad,
+                               rect.width - pad * 2, px=size,
+                               mkfont=probe.mkfont, lh=lh,
+                               bodyfont=probe.font_for(ff, size),
+                               iscale=iscale)
+
+    if end_at(steps[0], 1.0) <= limit:
+        return steps[0], 1.0
+    if has_img:
+        for iscale in IMG_STEPS[1:]:
+            if end_at(steps[0], iscale) <= limit:
+                return steps[0], iscale
+    small = IMG_STEPS[-1] if has_img else 1.0
+    for size in steps[1:]:
+        if end_at(size, small) <= limit:
+            return size, small
+    return steps[-1], small
+
+
+def build(src_path, pageno, slots, parts_of, out_path, fontpath="", pad=4.5,
           base_size=None, lh=1.55):
     """slots는 [(x, y, w, h)] pt 좌표, parts_of는 {슬롯번호: parts}.
 
@@ -214,21 +279,13 @@ def build(src_path, pageno, slots, parts_of, out_path, fontpath="", pad=3.0,
     shrunk = []
     for i, rect in boxes.items():
         parts = parts_of[i]
-        for size in steps:
-            # 먼저 재 본다. 넘치면 그리지 않고 한 단계 줄인다
-            end = pv.render_parts(probe, parts, rect.x0 + pad, rect.y0 + pad,
-                                  rect.width - pad * 2, px=size,
-                                  mkfont=probe.mkfont, lh=lh,
-                                  bodyfont=probe.font_for(ff, size))
-            if end <= rect.y1 - pad:
-                break
-        else:
-            size = steps[-1]
-        if size != steps[0]:
-            shrunk.append((i, size if end <= rect.y1 - pad else 0))
+        size, iscale = fit(probe, parts, rect, ff, steps, lh, pad)
+        if size != steps[0] or iscale < 1.0:
+            shrunk.append((i, size, iscale))
         pv.render_parts(cv, parts, rect.x0 + pad, rect.y0 + pad,
                         rect.width - pad * 2, px=size,
-                        mkfont=cv.mkfont, lh=lh, bodyfont=cv.font_for(ff, size))
+                        mkfont=cv.mkfont, lh=lh, bodyfont=cv.font_for(ff, size),
+                        drawimg=cv.drawimg, iscale=iscale)
 
     cv.flush()
     # 서브셋을 안 걸면 맑은 고딕 한 벌이 통째로 들어가 9MB가 붙는다
