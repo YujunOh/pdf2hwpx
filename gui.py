@@ -33,6 +33,7 @@ import fitz
 import pdf2hwpx as core
 import preview as pv
 import manuscript as ms
+import printpdf as pp
 
 OUTDIR = os.path.join(core.work_dir(), "out")
 os.makedirs(OUTDIR, exist_ok=True)
@@ -68,6 +69,7 @@ DEFAULT_KEYS = {
     "manuscript": "<Control-Shift-O>",
     "analyze": "<F5>",
     "build": "<Control-b>",
+    "buildpdf": "<Control-p>",
     "verify": "<F12>",
     "next_slot": "<Control-Return>",
     "prev_slot": "<Control-Shift-Return>",
@@ -81,6 +83,7 @@ DEFAULT_KEYS = {
 KEY_HELP = {
     "save": "작업 저장", "open": "작업 열기", "manuscript": "원고 불러오기",
     "analyze": "레이아웃 분석", "build": "HWPX 만들기", "verify": "한글로 확인",
+    "buildpdf": "인쇄용 PDF",
     "next_slot": "다음 슬롯", "prev_slot": "이전 슬롯",
     "circled": "원문자 순환 (3 누르고 눌러 ③)", "equation": "수식 넣기",
     "zoom": "확대 토글", "toggle_log": "로그 접기", "help": "도움말",
@@ -294,7 +297,8 @@ class App:
 
         act = ttk.Frame(rf)
         act.pack(fill="x")
-        ttk.Button(act, text="HWPX 만들기", command=self.build).pack(side="left")
+        ttk.Button(act, text="인쇄용 PDF", command=self.build_pdf).pack(side="left")
+        ttk.Button(act, text="HWPX 만들기", command=self.build).pack(side="left", padx=6)
         ttk.Button(act, text="한글로 열어 확인", command=self.verify).pack(side="left", padx=6)
         ttk.Button(act, text="결과 폴더", command=self.open_dir).pack(side="left")
         ttk.Button(act, text="도움말 F1", command=self.show_help).pack(side="right")
@@ -906,9 +910,13 @@ class App:
             ("4. 손질하기",
              "달러 기호 사이가 수식입니다. 타이핑하는 동안 왼쪽이 바로 갱신됩니다.\n"
              "칸보다 글이 길면 글자를 줄여 맞추고, 그래도 넘치면 알려 줍니다."),
-            ("5. HWPX 만들기",
-             "한글에서 열어 고칠 수 있는 파일이 나옵니다. 한글로 열어 확인을 누르면\n"
-             "실제로 열어 PDF로 뽑아 보여줍니다."),
+            ("5. 인쇄용 PDF (Ctrl+P)",
+             "인쇄소에 그대로 내는 파일입니다. 원본 디자인을 뜯지 않고 통째로 깐 뒤\n"
+             "글만 얹으므로 화질 손실이 0입니다. 굽는 단계가 없어 dpi를 고를 일도\n"
+             "없고, 원본의 색과 폰트와 투명도가 그대로 남습니다."),
+            ("6. HWPX 만들기 (Ctrl+B)",
+             "강사가 한글에서 열어 고칠 파일입니다. 원고를 손볼 사람에게 넘길 때\n"
+             "씁니다. 한글로 열어 확인을 누르면 실제로 열어 PDF로 뽑아 보여줍니다."),
         ]
         for i, (t, d) in enumerate(steps):
             ttk.Label(u, text=t, font=("맑은 고딕", 10, "bold")).grid(
@@ -963,6 +971,10 @@ class App:
 
     def key_analyze(self, ev=None):
         self.analyze(); return "break"
+
+    def key_buildpdf(self, ev=None):
+        self.build_pdf()
+        return "break"
 
     def key_build(self, ev=None):
         self.build(); return "break"
@@ -1234,6 +1246,39 @@ class App:
                 self.say("  없는 폰트는 한글이 임의로 대체합니다. 원본대로 나오려면 설치하세요.")
                 self.say("  Pretendard: github.com/orioncactus/pretendard/releases")
                 self.say("  나눔글꼴: hangeul.naver.com/font    NEXON Lv1 Gothic: brand.nexon.com")
+        except Exception:
+            self.say(traceback.format_exc())
+
+    def build_pdf(self):
+        """인쇄용 PDF. 원본 디자인을 뜯지 않고 통째로 깐 뒤 글만 얹는다.
+
+        굽는 단계가 없어서 dpi를 고를 일이 없다. 클리핑과 투명도와 그라데이션과
+        CMYK와 임베드 폰트가 전부 원본 그대로 남는다. 인쇄소에 그대로 낸다."""
+        try:
+            if not self.slots:
+                messagebox.showwarning("", "먼저 레이아웃을 분석하세요.")
+                return
+            filled = {i: parse_markup(self.texts.get(i, ""))
+                      for i in range(len(self.slots)) if self.texts.get(i, "").strip()}
+            if not filled:
+                messagebox.showinfo("", "채운 칸이 없습니다.")
+                return
+            out = os.path.join(OUTDIR, "인쇄용.pdf")
+            shrunk = pp.build(self.pdf_path.get(), self.pageno.get() - 1,
+                              self.slots, filled, out)
+            info = pp.report(out)
+            self.say("인쇄용 PDF 저장: %s (%.1f KB)" % (out, info["bytes"] / 1024))
+            self.say("  %.1f x %.1f mm, 이미지 %d개, 글자 %d자"
+                     % (info["size_mm"][0], info["size_mm"][1], info["images"], info["chars"]))
+            if info["images"] == 0:
+                self.say("  이미지 0개. 원본 디자인이 벡터 그대로 들어갔습니다.")
+            for i, size in shrunk:
+                if size:
+                    self.say("  슬롯%d 글자를 %.1fpt로 줄여 맞췄습니다." % (i, size))
+                else:
+                    self.say("  슬롯%d 는 %.1fpt로도 넘칩니다. 문제를 줄이거나 칸을 키우세요."
+                             % (i, pp.STEPS[-1]))
+            os.startfile(out)
         except Exception:
             self.say(traceback.format_exc())
 

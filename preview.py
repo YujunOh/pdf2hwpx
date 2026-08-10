@@ -183,14 +183,17 @@ def parse_script(s):
 class EqLayout:
     """노드의 크기를 재고 캔버스에 그린다. 단위는 픽셀."""
 
-    def __init__(self, base_px=14):
+    def __init__(self, base_px=14, mkfont=None):
         self.base = base_px
         self._fonts = {}
+        self._mk = mkfont          # PDF로 그릴 때는 폰트를 바깥에서 준다
 
     def font(self, px, italic=False, roman=False):
         """Cambria Math는 쓰지 않는다. 큰 괄호와 적분 기호를 담느라 폰트 메트릭의
         ascent와 descent가 극단적으로 커서, 22픽셀을 요청하면 123픽셀짜리 상자가
         나온다. 글자가 상자 안에서 위로 밀려 배치가 통째로 어긋난다."""
+        if self._mk is not None:
+            return self._mk(px, italic, roman)
         size = -max(int(round(px)), 6)          # tk는 정수만 받는다
         key = (size, italic, roman)
         if key not in self._fonts:
@@ -310,13 +313,17 @@ def body_font(px):
     return _body_fonts[size]
 
 
-def render_parts(cv, parts, x, y, w, px=13, fill="#111111", tags=("body",), lh=1.55):
+def render_parts(cv, parts, x, y, w, px=13, fill="#111111", tags=("body",), lh=1.55,
+                 mkfont=None, bodyfont=None):
     """텍스트와 수식이 섞인 parts를 캔버스에 흘려 그린다. 마지막 아래끝을 반환.
 
     줄을 먼저 짠 다음 그린다. 그리면서 baseline을 조정하면 키 큰 수식이
-    윗줄로 튀어나간다."""
-    eq = EqLayout(px)
-    f = body_font(px)
+    윗줄로 튀어나간다.
+
+    mkfont와 bodyfont를 주면 화면이 아니라 PDF에 그린다. 미리보기와 인쇄물이
+    같은 조판을 거치므로 보이는 대로 나온다."""
+    eq = EqLayout(px, mkfont=mkfont)
+    f = bodyfont if bodyfont is not None else body_font(px)
     epx = px * 1.05
 
     # 1) 줄 짜기. 각 조각은 (종류, 값, 폭, 위, 아래)
