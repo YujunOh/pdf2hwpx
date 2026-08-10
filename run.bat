@@ -4,7 +4,6 @@ cd /d "%~dp0"
 
 rem Everything here is ASCII on purpose. cmd reads a .bat using the system
 rem code page, so Korean text in this file breaks depending on the console.
-rem The Korean PDF path lives in out\sample.dhp instead, which is UTF-8 JSON.
 
 where py >nul 2>nul
 if %errorlevel%==0 (set PY=py -3) else (set PY=python)
@@ -15,11 +14,7 @@ if errorlevel 1 (
     %PY% -m pip install PyMuPDF pillow pywin32
 )
 
-if exist "out\sample.dhp" (
-    %PY% gui.py "out\sample.dhp"
-) else (
-    %PY% gui.py
-)
+%PY% gui.py
 
 if errorlevel 1 (
     echo.

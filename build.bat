@@ -24,6 +24,7 @@ rem setuptools, pip, unittest, pydocÀº »©Áö ¸» °Í. »©¸é exe°¡ Á¶¿ëÈ÷ ¸ØÃá´Ù.
   --noconsole ^
   --name pdf2hwpx ^
   --add-data "resources;resources" ^
+  --add-data "samples;samples" ^
   --exclude-module matplotlib ^
   --exclude-module numpy ^
   --exclude-module pytest ^

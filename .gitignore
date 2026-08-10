@@ -1,3 +1,7 @@
+# 이 PC에서만 쓰는 상태 파일. 최근에 연 파일 경로가 들어 있다
+recent.json
+keys.json
+
 __pycache__/
 *.pyc
 .DS_Store
@@ -20,3 +24,10 @@ dist/
 
 # 템플릿은 예외로 추적한다 (위에서 *.hwpx를 막았으므로)
 !resources/base.hwpx
+
+# 예제는 올린다. 받자마자 눌러 볼 것이 있어야 한다.
+# 실물 교재가 아니라 make_sample.py 가 그린 것이라 저작권 문제가 없다.
+!samples/
+!samples/예제_교재.pdf
+!samples/그래프_속도시간.png
+!samples/샘플원고_물리6문제.txt

@@ -38,6 +38,11 @@ import printpdf as pp
 OUTDIR = os.path.join(core.work_dir(), "out")
 os.makedirs(OUTDIR, exist_ok=True)
 
+def sample_pdf():
+    """딸려 오는 예제 교재. exe 안에 넣어 두어서 받자마자 열 수 있다."""
+    return core.resource_path("samples", "예제_교재.pdf")
+
+
 DEFAULT_PDF = next((a for a in sys.argv[1:] if a.lower().endswith(".pdf")), "")
 # 작업 파일을 인자로 받는다. 배치 파일이 한글 경로를 다루지 않아도 되게 하려는
 # 것이다. cmd는 코드페이지에 따라 한글을 깨뜨리지만 dhp는 UTF-8 JSON이라 안전하다
@@ -248,6 +253,17 @@ class App:
         ttk.Button(top, text="열기", width=5, command=self.open_project).pack(side="left", padx=(10, 2))
         ttk.Button(top, text="저장", width=5, command=self.save_project).pack(side="left")
 
+        # 산출물이 어디 생겼는지 알리는 자리. 로그를 안 보는 사람이 대부분이다
+        self.resultbar = ttk.Frame(self.root, padding=(8, 4))
+        self.rlabel = ttk.Label(self.resultbar, text="", foreground="#1a6b3a")
+        self.rlabel.pack(side="left")
+        ttk.Button(self.resultbar, text="폴더에서 보기", width=12,
+                   command=self.show_result).pack(side="right")
+        ttk.Button(self.resultbar, text="파일 열기", width=10,
+                   command=lambda: self.last_out and os.startfile(self.last_out)
+                   ).pack(side="right", padx=6)
+        self.last_out = ""
+
         pane = ttk.PanedWindow(self.root, orient="horizontal")
         pane.pack(fill="both", expand=True, padx=8, pady=4)
         self.pane = pane
@@ -386,7 +402,10 @@ class App:
                      % (len(names), len(bad)))
             if bad:
                 self.say("  △ 폰트는 %% 나 원문자가 다르게 나올 수 있습니다.")
-        self.root.after(0, apply)
+        try:
+            self.root.after(0, apply)
+        except Exception:
+            pass          # 창이 이미 닫혔다
 
     def picked_font(self):
         """콤보에서 고른 이름에서 표를 뗀다."""
@@ -414,6 +433,24 @@ class App:
 
     def open_dir(self):
         os.startfile(OUTDIR)
+
+    def show_result(self):
+        """탐색기를 열되 그 파일이 골라진 채로 연다. 폴더만 열면 파일이
+        여럿일 때 방금 만든 것을 다시 찾아야 한다."""
+        if not self.last_out or not os.path.exists(self.last_out):
+            os.startfile(OUTDIR)
+            return
+        import subprocess
+        # explorer는 성공해도 종료 코드 1을 낸다. check를 걸면 안 된다
+        subprocess.run(["explorer", "/select,%s" % os.path.normpath(self.last_out)],
+                       check=False)
+
+    def announce(self, path, note=""):
+        """방금 만든 파일을 창 아래에 띄운다."""
+        self.last_out = path
+        self.rlabel.config(text="%s 저장됨   %s   %s"
+                                % (os.path.basename(path), os.path.dirname(path), note))
+        self.resultbar.pack(fill="x", side="bottom", before=self.pane)
 
     def clip_of(self, page):
         w = page.rect.width
@@ -714,42 +751,67 @@ class App:
         cw = max(cv.winfo_width(), 300)
         ch = max(cv.winfo_height(), 200)
         cx = cw / 2
-        y = max(ch / 2 - 150, 30)
+        y = max(ch / 2 - 170, 24)
         cv.create_text(cx, y, text="디자인이 끝난 교재 PDF를 여세요",
                        font=("맑은 고딕", -22, "bold"), fill="#2b3a55")
-        y += 40
-        cv.create_text(cx, y, text="위쪽 찾아보기 를 누르거나, PDF 파일을 이 프로그램 위로 끌어다 놓으세요.",
-                       font=("맑은 고딕", -13), fill="#55617a")
         y += 46
-        steps = [
-            "1.  PDF를 열면 문제 칸을 스스로 찾습니다. 잘못 잡히면 손으로 그리면 됩니다.",
-            "2.  칸을 누르고 오른쪽에 문제를 칩니다. 원고 파일을 불러올 수도 있습니다.",
-            "     빨리 보고 싶으면 전체 예시 를 누르세요. 칸이 한 번에 채워집니다.",
-            "3.  그래프나 그림은 그림 넣기 로 넣습니다. 아래 글이 알아서 밀립니다.",
-            "4.  Ctrl+P 를 누르면 인쇄용 PDF가 나오고 바로 열립니다.",
-        ]
-        for s in steps:
-            cv.create_text(cx - 250, y, text=s, anchor="w",
-                           font=("맑은 고딕", -13), fill="#3d4a63")
-            y += 30
-        y += 16
-        btn = cv.create_rectangle(cx - 92, y, cx + 92, y + 40,
-                                  fill="#2f6fd0", outline="", tags="pickbtn")
-        cv.create_text(cx, y + 20, text="교재 PDF 고르기", fill="#ffffff",
+
+        # 눌러야 할 것을 먼저 놓는다. 설명은 그 아래에 접어 둔다
+        cv.create_rectangle(cx - 96, y, cx + 96, y + 42,
+                            fill="#2f6fd0", outline="", tags="pickbtn")
+        cv.create_text(cx, y + 21, text="교재 PDF 고르기", fill="#ffffff",
                        font=("맑은 고딕", -14, "bold"), tags="pickbtn")
         cv.tag_bind("pickbtn", "<Button-1>", lambda e: self.pick())
-        cv.config(cursor="")
+        y += 54
+
+        if os.path.exists(sample_pdf()):
+            cv.create_rectangle(cx - 96, y, cx + 96, y + 36,
+                                fill="", outline="#8fb0e0", tags="demobtn")
+            cv.create_text(cx, y + 18, text="예제로 해보기", fill="#2f6fd0",
+                           font=("맑은 고딕", -13), tags="demobtn")
+            cv.tag_bind("demobtn", "<Button-1>", lambda e: self.open_sample())
+            y += 48
+
         if self.recent:
-            y += 58
-            cv.create_text(cx, y, text="최근에 연 파일", font=("맑은 고딕", -11), fill="#8892a6")
-            for i, p in enumerate(self.recent[:3]):
-                y += 24
-                t = cv.create_text(cx, y, text=os.path.basename(p),
-                                   font=("맑은 고딕", -12, "underline"), fill="#2f6fd0",
-                                   tags="recent%d" % i)
+            y += 8
+            cv.create_text(cx, y, text="최근에 연 파일", font=("맑은 고딕", -11),
+                           fill="#8892a6")
+            for i, q in enumerate(self.recent[:3]):
+                y += 26
+                cv.create_text(cx, y, text=os.path.basename(q),
+                               font=("맑은 고딕", -12, "underline"), fill="#2f6fd0",
+                               tags="recent%d" % i)
+                cv.create_text(cx, y + 13, text=os.path.dirname(q)[-52:],
+                               font=("맑은 고딕", -9), fill="#a3abbb")
                 cv.tag_bind("recent%d" % i, "<Button-1>",
-                            lambda e, q=p: (self.pdf_path.set(q), self.analyze()))
+                            lambda e, w=q: (self.pdf_path.set(w), self.analyze()))
+                y += 14
+
+        y += 34
+        cv.create_text(cx, y, text="쓰는 순서", font=("맑은 고딕", -11), fill="#8892a6")
+        y += 22
+        for line in (
+            "1.  PDF를 열면 문제 칸을 스스로 찾습니다. 잘못 잡히면 손으로 그리면 됩니다.",
+            "2.  칸을 누르고 오른쪽에 문제를 칩니다. 원고 파일을 불러올 수도 있습니다.",
+            "3.  그래프나 그림은 그림 넣기 로 넣습니다. 아래 글이 알아서 밀립니다.",
+            "4.  Ctrl+P 를 누르면 인쇄용 PDF가 나오고 바로 열립니다.",
+        ):
+            cv.create_text(cx - 240, y, text=line, anchor="w",
+                           font=("맑은 고딕", -12), fill="#6b7689")
+            y += 24
         self.status.config(text="PDF를 고르면 시작합니다")
+
+    def open_sample(self):
+        """딸려 온 예제 교재를 연다. 처음 받은 사람이 바로 눌러 볼 것."""
+        p = sample_pdf()
+        if not os.path.exists(p):
+            messagebox.showwarning("", "예제 파일을 찾지 못했습니다.")
+            return
+        self.pdf_path.set(p)
+        self.pageno.set(1)
+        self.side.set("전체")
+        self.analyze()
+        self.say("예제 교재를 열었습니다. 전체 예시 를 누른 뒤 Ctrl+P 를 눌러 보세요.")
 
     def remember(self, path):
         """방금 연 PDF를 기억한다. 다음에 열면 첫 화면에서 바로 고를 수 있다."""
@@ -1513,6 +1575,7 @@ class App:
             core.write_hwpx(tpl, section, out, style_table=table)
             self.say("HWPX 저장: %s (%.1f KB, 도형 %d, 수식 %d)"
                      % (out, os.path.getsize(out) / 1024, z, n_eq))
+            self.announce(out, "%.0f KB · 수식 %d" % (os.path.getsize(out) / 1024, n_eq))
             self.say("  글자모양 %d개, 폰트 %d종" % (len(table.rows), len(table.fonts)))
             import tkinter.font as tkf
             installed = set(tkf.families())
@@ -1548,6 +1611,7 @@ class App:
             info = pp.report(out)
             self.say("인쇄용 PDF를 만들었습니다.")
             self.say("  %s  (%.0f KB)" % (out, info["bytes"] / 1024))
+            self.announce(out, "%.0f KB · 이미지 %d개" % (info["bytes"] / 1024, info["images"]))
             self.say("  %.1f x %.1f mm, 이미지 %d개, 글자 %d자"
                      % (info["size_mm"][0], info["size_mm"][1], info["images"], info["chars"]))
             if info["images"] == 0:
