@@ -490,12 +490,13 @@ class App:
         if s["k"] not in ("curve", "line"):
             return False
         x, y, w, h = self.shape_box(s)
-        if h >= 22 or w >= 60:
-            return False
-        cx, cy = x + w / 2.0, y + h / 2.0
+        if w > 260 or h > 70:
+            return False                 # 이만큼 크면 글자가 아니라 디자인이다
+        # 크기로 자르면 제목처럼 큰 글자를 놓친다. 글자 상자 안에 들어가는지로 본다
         for t in self._text_boxes:
-            if t[0] - 1 <= cx <= t[2] + 1 and t[1] - 1 <= cy <= t[3] + 1:
-                return True          # 텍스트가 이미 있는 자리다
+            if (x >= t[0] - 2 and y >= t[1] - 2
+                    and x + w <= t[2] + 2 and y + h <= t[3] + 2):
+                return True
         return False
 
     def covered_by_filled_slot(self, s):
@@ -506,9 +507,11 @@ class App:
             return False
         bx, by, bw, bh = self.shape_box(s)
         cx, cy = bx + bw / 2.0, by + bh / 2.0
-        for x, y, w, h in self.slots:
+        for i, (x, y, w, h) in enumerate(self.slots):
             if x - 2 <= cx <= x + w + 2 and y - 2 <= cy <= y + h + 2:
-                return True
+                # 아직 안 채운 칸이면 원본을 남긴다. 지워 버리면 무엇이
+                # 있던 자리인지 알 수 없다
+                return bool(self.texts.get(i, "").strip())
         return False
 
     # ------------------------------------------------------------ 미리보기
@@ -612,6 +615,17 @@ class App:
                     cv.create_text(X(x + w) - 4, Y(y + h) - 4, anchor="se",
                                    text="넘침", fill="#e05a4f",
                                    font=("맑은 고딕", -max(int(9 * sc * 1.6), 9), "bold"))
+
+        # 페이지 밖으로 나간 도형을 가린다. PDF는 페이지에서 잘리는데
+        # 캔버스는 안 잘라서 배경이 삐져나와 지저분해 보인다
+        big = 10000
+        for a, b, c2, d2 in ((X(0) - big, Y(0) - big, X(0), Y(self.page_h) + big),
+                             (X(self.page_w), Y(0) - big, X(self.page_w) + big, Y(self.page_h) + big),
+                             (X(0) - big, Y(0) - big, X(self.page_w) + big, Y(0)),
+                             (X(0) - big, Y(self.page_h), X(self.page_w) + big, Y(self.page_h) + big)):
+            cv.create_rectangle(a, b, c2, d2, fill="#e9e9ee", outline="")
+        cv.create_rectangle(X(0), Y(0), X(self.page_w), Y(self.page_h),
+                            outline="#b9b9c4")
 
         if self._rubber:
             rx, ry, rw, rh = self._rubber

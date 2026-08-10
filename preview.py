@@ -113,9 +113,12 @@ def parse(tokens, pos=0, stop=None):
                 w = t[1]
                 low = w.lower()
                 if low == "over" or low == "atop":
-                    num = items[:] ; items = []
+                    # 한글 수식에서 over는 바로 앞 항 하나만 분자로 삼는다.
+                    # 앞의 전부를 가져가면 int _0 ^1 {..} over {..} 에서
+                    # 적분 기호까지 분자로 올라가 조판이 무너진다.
+                    num = items.pop() if items else ("row", [])
                     den, pos = parse_atom(tokens, pos + 1)
-                    items.append(("frac", ("row", num), den, low == "over"))
+                    items.append(("frac", num, den, low == "over"))
                     continue
                 if low == "sqrt":
                     arg, pos = parse_atom(tokens, pos + 1)
