@@ -4,6 +4,7 @@
 한글을 띄우지 않고도 편집하면서 바로 결과를 보기 위한 것이다.
 정확한 조판은 한글이 하고, 이건 위치와 모양을 가늠하는 용도다.
 """
+import math
 import re
 import tkinter.font as tkfont
 
@@ -416,15 +417,34 @@ def render_parts(cv, parts, x, y, w, px=13, fill="#111111", tags=("body",), lh=1
     epx = px * 1.05
 
     # 1) 줄 짜기. 각 조각은 (종류, 값, 폭, 위, 아래)
+    # 줄마다 (조각들, 시작 x, 쓸 수 있는 폭)을 함께 담는다. 그림 옆으로
+    # 본문을 흘릴 때 그 몇 줄만 폭이 좁아진다
     lines, cur, cw = [], [], 0.0
+    pend = None            # 옆에 흘리는 중인 그림
+
+    def limit():
+        if pend and len(lines) < pend["last"]:
+            return pend["narrow"]
+        return w
+
+    def line_x():
+        if pend and len(lines) < pend["last"] and pend["side"] == "l":
+            return x + pend["dw"] + pend["gap"]
+        return x
 
     def wrap():
         nonlocal cur, cw
-        lines.append(cur)
+        lines.append((cur, line_x(), limit()))
         cur, cw = [], 0.0
 
     for p in parts:
         if p.get("br"):
+            wrap()
+            continue
+        if "box" in p:
+            if cur:
+                wrap()
+            cur.append(("box", p["box"], w, 0.0, 0.0))
             wrap()
             continue
         if "img" in p:
@@ -438,8 +458,30 @@ def render_parts(cv, parts, x, y, w, px=13, fill="#111111", tags=("body",), lh=1
             # 보통 본문보다 조금 좁다
             # 칸 폭을 꽉 채우면 경계선에 닿아 답답하다. 수능 문제지에서 잰
             # 블록 그림 34개의 최대가 판면의 99.2% 였다
-            want = w * min(max(p.get("pct", 99), 5), 99) / 100.0 * iscale
             nat = iw * 72.0 / 96.0            # 화면 해상도 기준으로 pt 환산
+
+            # 옆에 흘리기. 수능 과학 그림 67개 중 32개가 이렇게 붙어 있다.
+            # 오른쪽이 81%라 그쪽을 기본으로 둔다
+            if p.get("wrap") and pend is None and drawimg is not None:
+                fw = w * min(max(p.get("pct", 40), 5), 60) / 100.0 * iscale
+                fw = min(fw, nat) if nat > 0 else fw
+                fh = fw * ih / float(iw)
+                gap = max(px * 0.37, 3.0)
+                narrow = w - fw - gap
+                # 좁혀진 본문이 한글 열두 자보다 좁으면 오른쪽 끝이 심하게
+                # 들쭉날쭉해진다. 그럴 바에는 그냥 블록으로 놓는다
+                if narrow >= px * 12 and fw <= w * 0.55:
+                    if cur:
+                        wrap()
+                    n = max(int(math.ceil(fh / (px * lh))), 1)
+                    pend = {"path": p["img"], "dw": fw, "dh": fh, "gap": gap,
+                            "side": p["wrap"], "narrow": narrow,
+                            "first": len(lines), "last": len(lines) + n}
+                    continue
+
+            # 칸 폭을 꽉 채우면 경계선에 닿아 답답하다. 수능 문제지에서 잰
+            # 블록 그림 34개의 최대가 판면의 99.2% 였다
+            want = w * min(max(p.get("pct", 99), 5), 99) / 100.0 * iscale
             dw = min(want, nat) if nat > 0 else want
             dh = dw * ih / float(iw)
             if cur:
@@ -450,14 +492,14 @@ def render_parts(cv, parts, x, y, w, px=13, fill="#111111", tags=("body",), lh=1
         if "eq" in p:
             node = parse_script(p["eq"])
             ew, ea, eb = eq.measure(node, epx)
-            if cw + ew > w and cur:
+            if cw + ew > limit() and cur:
                 wrap()
             cur.append(("eq", node, ew, ea, eb))
             cw += ew + 2
             continue
         for word in re.findall(r"\S+\s*|\s+", p.get("t", "")):
             ww = f.measure(word)
-            if cw + ww > w and cur:
+            if cw + ww > limit() and cur:
                 wrap()
             cur.append(("t", word, ww, px * 0.78, px * 0.24))
             cw += ww
@@ -465,7 +507,42 @@ def render_parts(cv, parts, x, y, w, px=13, fill="#111111", tags=("body",), lh=1
 
     # 2) 줄마다 높이를 재서 그린다
     cy = y
-    for ln in lines:
+    fy = None
+    for idx, (ln, lx, lw_) in enumerate(lines):
+        if pend and idx == pend["first"]:
+            fy = cy
+            gx = x + w - pend["dw"] if pend["side"] != "l" else x
+            drawimg(gx, cy, pend["dw"], pend["dh"], pend["path"], tags)
+        if ln and ln[0][0] == "box":
+            # 수능 문제지에서 잰 값이다. 상자 폭은 판면 100%(그림의 99%와
+            # 다르다), 안쪽 여백은 좌우 0.76줄, 위 1.14줄, 아래 0.66줄,
+            # 윗선 가운데 라벨 자리를 4줄만큼 비운다
+            box = ln[0][1]
+            padx, ptop, pbot = px * 0.76, px * 1.14, px * 0.66
+            top = cy + px * 0.5
+            end = render_parts(cv, box["parts"], x + padx, top + ptop,
+                               w - padx * 2, px=px, fill=fill, tags=tags, lh=lh,
+                               mkfont=mkfont, bodyfont=bodyfont,
+                               drawimg=drawimg, iscale=iscale)
+            bot = end + pbot
+            lw = px * 0.064          # 0.70pt at 11pt body
+            label = box.get("label") or ""
+            if label:
+                gap = px * 4.0
+                mid = x + w / 2.0
+                cv.create_line(x, top, mid - gap / 2, top, fill=fill, tags=tags, width=lw)
+                cv.create_line(mid + gap / 2, top, x + w, top, fill=fill, tags=tags, width=lw)
+                lf = bodyfont if bodyfont is not None else body_font(px * 0.88)
+                tw = lf.measure(label)
+                cv.create_text(mid - tw / 2, top + px * 0.30, text=label,
+                               anchor="sw", font=lf, fill=fill, tags=tags)
+            else:
+                cv.create_line(x, top, x + w, top, fill=fill, tags=tags, width=lw)
+            cv.create_line(x, bot, x + w, bot, fill=fill, tags=tags, width=lw)
+            cv.create_line(x, top, x, bot, fill=fill, tags=tags, width=lw)
+            cv.create_line(x + w, top, x + w, bot, fill=fill, tags=tags, width=lw)
+            cy = bot + px * 0.5
+            continue
         if ln and ln[0][0] == "img":
             _, path, dw, dh, _ = ln[0]
             # 위 간격이 없어서 본문 마지막 줄에 그림이 바로 붙어 있었다.
@@ -480,7 +557,7 @@ def render_parts(cv, parts, x, y, w, px=13, fill="#111111", tags=("body",), lh=1
         above = max([c[3] for c in ln], default=px * 0.78)
         below = max([c[4] for c in ln], default=px * 0.24)
         base = cy + above
-        cx = x
+        cx = lx
         # 낱말을 하나씩 따로 그리면 낱말마다 반올림 오차가 붙어 자간이 벌어진다.
         # 이어진 낱말은 한 문자열로 합쳐 한 번에 그린다. 그래야 폰트가 가진
         # 커닝도 산다.
@@ -501,4 +578,6 @@ def render_parts(cv, parts, x, y, w, px=13, fill="#111111", tags=("body",), lh=1
             i = j
         # 빈 줄도 한 줄 높이는 차지한다
         cy = base + max(below, px * (lh - 0.78))
+        if pend and idx == pend["last"] - 1 and fy is not None:
+            cy = max(cy, fy + pend["dh"] + px * 0.30)
     return cy

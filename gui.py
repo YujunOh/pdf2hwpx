@@ -152,28 +152,61 @@ EQ_TRAPS = [
 ]
 
 
-IMG_RE = re.compile(r"\[\[img:([^\]|]+?)(?:\|(\d{1,3}))?\]\]")
+IMG_RE = re.compile(r"\[\[img:([^\]|]+?)(?:\|(\d{1,3}))?(?:\|([lr]))?\]\]")
+
+# 과학 문제는 대부분 보기 상자를 낀다. 수능 과학 80문항 중 61개가 그렇다.
+# [[보기]] 와 [[/보기]] 사이가 상자 안이다. [[자료]] 는 라벨 없는 상자다
+BOX_OPEN = re.compile(r"^\s*\[\[(보기|자료)\]\]\s*$")
+BOX_CLOSE = re.compile(r"^\s*\[\[/(보기|자료)\]\]\s*$")
+BOX_LABEL = {"보기": "<보 기>", "자료": ""}
+
+
+def _line_parts(line, parts):
+    """한 줄을 조각으로 나눠 담는다."""
+    for tok in re.split(r"(\$[^$]*\$|\[\[img:[^\]]*\]\])", line):
+        if not tok:
+            continue
+        m = IMG_RE.fullmatch(tok)
+        if m:
+            q = {"img": m.group(1).strip()}
+            if m.group(2):
+                q["pct"] = int(m.group(2))
+            if m.group(3):
+                q["wrap"] = m.group(3)
+            parts.append(q)
+        elif tok.startswith("$") and tok.endswith("$") and len(tok) > 1:
+            parts.append({"eq": tok[1:-1]})
+        else:
+            parts.append({"t": tok})
 
 
 def parse_markup(text):
     """달러 기호 사이는 수식, 줄바꿈은 br, [[img:경로]] 는 그림.
 
-    그림 뒤에 |70 처럼 적으면 칸 폭의 70%로 넣는다. 안 적으면 칸 폭에 맞춘다."""
-    parts = []
-    for i, line in enumerate(text.split("\n")):
-        if i:
+    그림 뒤에 |70 처럼 적으면 칸 폭의 70%로 넣는다. 안 적으면 99%다.
+    그 뒤에 |r 이나 |l 을 붙이면 본문이 그림 옆으로 흐른다.
+
+    [[보기]] 와 [[/보기]] 사이는 테두리 상자에 담긴다. 과학 문제는
+    대부분 이 상자를 낀다."""
+    lines = text.split("\n")
+    parts, i, first = [], 0, True
+    while i < len(lines):
+        m = BOX_OPEN.match(lines[i])
+        if m:
+            kind = m.group(1)
+            j, body = i + 1, []
+            while j < len(lines) and not BOX_CLOSE.match(lines[j]):
+                body.append(lines[j])
+                j += 1
+            parts.append({"box": {"label": BOX_LABEL[kind],
+                                  "parts": parse_markup("\n".join(body))}})
+            i, first = j + 1, False
+            continue
+        if not first:
             parts.append({"br": True})
-        for tok in re.split(r"(\$[^$]*\$|\[\[img:[^\]]*\]\])", line):
-            if not tok:
-                continue
-            m = IMG_RE.fullmatch(tok)
-            if m:
-                parts.append({"img": m.group(1).strip(),
-                              "pct": int(m.group(2)) if m.group(2) else 100})
-            elif tok.startswith("$") and tok.endswith("$") and len(tok) > 1:
-                parts.append({"eq": tok[1:-1]})
-            else:
-                parts.append({"t": tok})
+        first = False
+        _line_parts(lines[i], parts)
+        i += 1
     return parts
 
 
@@ -250,8 +283,9 @@ class App:
         ttk.Combobox(top, textvariable=self.side, values=["전체", "좌면", "우면"],
                      width=5, state="readonly").pack(side="left", padx=4)
         ttk.Button(top, text="레이아웃 분석", command=self.analyze).pack(side="left", padx=(8, 0))
-        ttk.Button(top, text="열기", width=5, command=self.open_project).pack(side="left", padx=(10, 2))
-        ttk.Button(top, text="저장", width=5, command=self.save_project).pack(side="left")
+        ttk.Button(top, text="작업 열기", command=self.open_project).pack(side="left", padx=(10, 2))
+        ttk.Button(top, text="작업 저장", command=self.save_project).pack(side="left")
+        ttk.Button(top, text="칸 배치 ▾", command=self.layout_menu).pack(side="left", padx=(6, 0))
 
         # 산출물이 어디 생겼는지 알리는 자리. 로그를 안 보는 사람이 대부분이다
         self.resultbar = ttk.Frame(self.root, padding=(8, 4))
@@ -413,6 +447,26 @@ class App:
     def picked_font(self):
         """콤보에서 고른 이름에서 표를 뗀다."""
         return self.fontname.get().replace(" △", "")
+
+    def layout_menu(self):
+        """칸 배치를 저장하거나 얹는다."""
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label="칸 배치 저장 (.dlay)", command=self.save_layout)
+        m.add_command(label="칸 배치 불러오기", command=self.load_layout)
+        m.add_separator()
+        m.add_command(label="이 배치를 모든 쪽에 쓰기", command=self.layout_all_pages)
+        try:
+            m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
+        finally:
+            m.grab_release()
+
+    def layout_all_pages(self):
+        """지금 칸 배치를 이 PDF의 모든 쪽에 적용해 한 번에 뽑는다."""
+        if not self.slots:
+            messagebox.showwarning("", "먼저 칸을 잡으세요.")
+            return
+        messagebox.showinfo("", "아직 만들지 않았습니다.\n"
+                                "여러 쪽 한 번에 처리는 다음 차례입니다.")
 
     def _place_sash(self):
         try:
@@ -1158,9 +1212,25 @@ class App:
              "그래프나 실험 그림을 넣습니다. 미리보기 아래 '그림 넣기' 를 누르면\n"
              "커서 자리에 들어가고 아래 글이 자동으로 밀립니다. 칸을 넘치면\n"
              "그림을 먼저 줄이고, 그래도 안 되면 글자를 줄입니다. 글자 크기는\n"
-             "교재 전체가 같아야 하므로 마지막에 손댑니다.\n"
-             "[[img:경로|70]] 처럼 뒤에 숫자를 적으면 칸 폭의 70%로 넣습니다."),
-            ("5. 손질하기",
+             "한 쪽 안에서 같아야 하므로 마지막에 손댑니다.\n"
+             "[[img:경로|70]] 처럼 뒤에 숫자를 적으면 칸 폭의 70%로 넣습니다.\n"
+             "[[img:경로|38|r]] 처럼 r 을 붙이면 그림이 오른쪽에 붙고 글이\n"
+             "그 옆으로 흐릅니다. l 이면 왼쪽입니다. 수능 과학 문제지에서\n"
+             "그림 절반가량이 이렇게 들어갑니다."),
+            ("5. 보기 상자",
+             "과학 문제는 대부분 보기 상자를 낍니다. 이렇게 적습니다.\n\n"
+             "    [[보기]]\n"
+             "    ㄱ. 파장은 2 cm이다.\n"
+             "    ㄴ. P는 보강 간섭점이다.\n"
+             "    [[/보기]]\n\n"
+             "테두리와 <보 기> 라벨이 자동으로 붙습니다. 수능 문제지에서 잰\n"
+             "규격 그대로입니다. [[자료]] 로 열면 라벨 없는 상자가 됩니다."),
+            ("6. 칸 배치 재사용",
+             "위쪽 '칸 배치' 에서 지금 칸을 파일로 저장해 두었다가 다른 쪽이나\n"
+             "다른 PDF에 그대로 얹을 수 있습니다. 교재는 매주 새 문항이\n"
+             "들어가므로, 디자이너가 잡아 준 칸을 자산으로 두고 내용만\n"
+             "갈아 끼우는 쪽이 빠릅니다. 폰트와 크기와 행간도 같이 갑니다."),
+            ("9. 손질하기",
              "달러 기호 사이가 수식입니다. 타이핑하는 동안 왼쪽이 바로 갱신됩니다.\n"
              "칸보다 글이 길면 글자를 줄여 맞추고, 그래도 넘치면 알려 줍니다."),
             ("6. 인쇄용 PDF (Ctrl+P)",
@@ -1286,6 +1356,62 @@ class App:
             "font": self.fontname.get(), "size": self.bodysize.get(),
             "leading": self.leading,
         }
+
+    # ------------------------------------------------------------ 칸 배치 자산
+    def save_layout(self):
+        """칸 배치만 따로 저장한다.
+
+        학원 교재는 한 번 만들고 끝이 아니라 매주 새 문항이 들어간다.
+        디자이너가 잡아 준 칸 배치를 자산으로 두고 내용만 갈아 끼우는 것이
+        이 도구의 쓸모다. 그래서 원고와 칸을 분리해 둔다."""
+        if not self.slots:
+            messagebox.showwarning("", "먼저 레이아웃을 분석하거나 칸을 그리세요.")
+            return
+        p = filedialog.asksaveasfilename(
+            title="칸 배치 저장", defaultextension=".dlay", initialdir=OUTDIR,
+            filetypes=[("칸 배치", "*.dlay")])
+        if not p:
+            return
+        json.dump({"slots": [list(s) for s in self.slots],
+                   "page_w": self.page_w, "page_h": self.page_h,
+                   "font": self.picked_font(), "size": self.bodysize.get(),
+                   "leading": self.leading},
+                  open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+        self.say("칸 배치를 저장했습니다: %s (칸 %d개)" % (p, len(self.slots)))
+        self.announce(p, "칸 %d개" % len(self.slots))
+
+    def load_layout(self):
+        """저장해 둔 칸 배치를 지금 쪽에 얹는다. 내용은 건드리지 않는다."""
+        p = filedialog.askopenfilename(title="칸 배치 불러오기", initialdir=OUTDIR,
+                                       filetypes=[("칸 배치", "*.dlay")])
+        if not p:
+            return
+        try:
+            d = json.load(open(p, encoding="utf-8"))
+        except Exception:
+            self.say(traceback.format_exc()); return
+        pw, ph = d.get("page_w", 0), d.get("page_h", 0)
+        if pw and ph and (abs(pw - self.page_w) > 2 or abs(ph - self.page_h) > 2):
+            if not messagebox.askyesno(
+                    "쪽 크기가 다릅니다",
+                    "저장할 때는 %.0f x %.0f mm 였고 지금은 %.0f x %.0f mm 입니다.\n"
+                    "칸 위치가 안 맞을 수 있습니다. 그래도 얹을까요?"
+                    % (pw * 25.4 / 72, ph * 25.4 / 72,
+                       self.page_w * 25.4 / 72, self.page_h * 25.4 / 72)):
+                return
+        self.slots = [tuple(s) for s in d.get("slots", [])]
+        if d.get("font"):
+            self.fontname.set(d["font"])
+        if d.get("size"):
+            self.bodysize.set(d["size"])
+        if d.get("leading"):
+            self.leading = d["leading"]
+        self.sync_slots()
+        self.reindex()
+        self._psize_key = None
+        self.redraw()
+        self.say("칸 배치를 얹었습니다: 칸 %d개, %s %.1fpt"
+                 % (len(self.slots), self.picked_font(), self.bodysize.get()))
 
     def save_project(self):
         p = filedialog.asksaveasfilename(
