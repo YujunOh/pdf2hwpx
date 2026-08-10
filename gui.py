@@ -205,6 +205,8 @@ class App:
         self._bg_photo = None
         self._photos = {}    # 미리보기에 그린 자료 그림
         self.bad_fonts = set()
+        self._psize = None       # 지면 글자 크기 캐시
+        self._psize_key = None
         self.shapes, self.slots, self.texts = [], [], {}
         self.sel = 0
         self.page_w, self.page_h = 595.276, 841.89
@@ -869,8 +871,9 @@ class App:
             txt = self.texts.get(i, "").strip()
             if txt:
                 parts = parse_markup(txt)
-                px = max(int(self.bodysize.get() * sc), 6)
-                _, iscale = self.fit_size(parts, w, h)
+                psz = self.page_size()
+                px = max(int(psz * sc), 6)
+                _, iscale, _ = self.fit_size(parts, w, h, force_size=psz)
                 end = pv.render_parts(cv, parts, X(x) + 4,
                                       Y(y) + 2 + (px * 0.2 if self.showgrid.get() else 0),
                                       w * sc - 8, px=px, tags=("body", "s%d" % i),
@@ -1401,13 +1404,17 @@ class App:
         self.redraw()
 
     # ------------------------------------------------------------ 생성
-    def fit_size(self, parts, w_pt, h_pt):
-        """칸에 들어가는 (글자 크기, 그림 배율). 그림을 먼저 줄인다.
-
-        글자 크기는 교재 전체가 같아야 눈에 거슬리지 않는다. 자료 그림이
-        붙는 과학 문제에서 이 순서가 중요하다."""
+    def size_steps(self):
         base = self.bodysize.get()
-        steps = tuple(x for x in (base,) + pp.STEPS if x <= base) or (base,)
+        return tuple(x for x in (base,) + pp.STEPS if x <= base) or (base,)
+
+    def fit_size(self, parts, w_pt, h_pt, force_size=None):
+        """칸에 들어가는 (글자 크기, 그림 배율, 그래도 넘치는가).
+
+        그림을 먼저 줄이고 글자는 마지막에 손댄다. 다만 그림을 줄이면 그 안의
+        축 이름과 눈금 숫자도 같이 줄어든다. 그래서 그림 하한을 65%로 둔다.
+        더 줄이면 그래프 눈금을 못 읽는다."""
+        steps = (force_size,) if force_size else self.size_steps()
         has_img = any("img" in p for p in parts)
         cv = tk.Canvas(self.root)          # 화면에 붙이지 않는 측정용
         try:
@@ -1418,18 +1425,35 @@ class App:
                                        bodyfont=pv.body_font(size, self.picked_font()))
             limit = h_pt - 6
             if end_at(steps[0], 1.0) <= limit:
-                return steps[0], 1.0
+                return steps[0], 1.0, False
             if has_img:
                 for iscale in pp.IMG_STEPS[1:]:
                     if end_at(steps[0], iscale) <= limit:
-                        return steps[0], iscale
-            small = pp.IMG_STEPS[-1] if has_img else 1.0
+                        return steps[0], iscale, False
+            small = pp.IMG_MIN if has_img else 1.0
             for size in steps[1:]:
                 if end_at(size, small) <= limit:
-                    return size, small
-            return steps[-1], small
+                    return size, small, False
+            return steps[-1], small, True
         finally:
             cv.destroy()
+
+    def page_size(self):
+        """지면 전체에서 쓸 글자 크기. 가장 빡빡한 칸에 맞춘다.
+
+        칸마다 따로 정하면 한 쪽 안에서 문항마다 크기가 달라진다. 학생은 그
+        차이를 뜻으로 읽는다. 매번 다시 재면 느리므로 글을 고칠 때만 다시 잰다."""
+        key = (self.bodysize.get(), round(self.leading, 3), self.picked_font(),
+               tuple(sorted((i, v) for i, v in self.texts.items() if v.strip())),
+               tuple(tuple(round(v, 1) for v in s) for s in self.slots))
+        if key != self._psize_key:
+            worst = self.size_steps()[0]
+            for i, (x, y, w, h) in enumerate(self.slots):
+                t = self.texts.get(i, "").strip()
+                if t:
+                    worst = min(worst, self.fit_size(parse_markup(t), w, h)[0])
+            self._psize, self._psize_key = worst, key
+        return self._psize
 
     def build(self):
         try:
@@ -1472,7 +1496,10 @@ class App:
                     continue
                 parts = parse_markup(txt)
                 n_eq += count_eq(parts)
-                size, iscale = self.fit_size(parts, w, h)
+                size, iscale, over = self.fit_size(parts, w, h,
+                                                   force_size=self.page_size())
+                if over:
+                    self.say("  슬롯%d 는 더 줄여도 안 들어갑니다. 글을 줄이거나 칸을 키우세요." % i)
                 if iscale < 1.0:
                     self.say("  슬롯%d 그림을 %d%%로 줄여 맞췄습니다." % (i, iscale * 100))
                 if size < self.bodysize.get():
@@ -1525,14 +1552,16 @@ class App:
                      % (info["size_mm"][0], info["size_mm"][1], info["images"], info["chars"]))
             if info["images"] == 0:
                 self.say("  이미지 0개. 원본 디자인이 벡터 그대로 들어갔습니다.")
-            for i, size, iscale in shrunk:
+            for i, size, iscale, over in shrunk:
                 bits = []
                 if iscale < 1.0:
-                    bits.append("그림 %d%%" % (iscale * 100))
+                    bits.append("그림 %d%%" % round(iscale * 100))
                 if size < self.bodysize.get():
                     bits.append("글자 %.1fpt" % size)
                 if bits:
-                    self.say("  슬롯%d 를 %s 로 줄여 맞췄습니다." % (i, ", ".join(bits)))
+                    self.say("  슬롯%d 를 %s 로 맞췄습니다." % (i, ", ".join(bits)))
+                if over:
+                    self.say("  슬롯%d 는 더 줄여도 안 들어갑니다. 글을 줄이거나 칸을 키우세요." % i)
             os.startfile(out)
         except Exception:
             self.say(traceback.format_exc())

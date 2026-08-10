@@ -213,16 +213,23 @@ def wipe(page, boxes):
                           graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED)
 
 
-IMG_STEPS = (1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.42)
+# 그림을 줄이면 그 안의 축 이름과 눈금 숫자도 같이 줄어든다. 그래프의 눈금값은
+# 장식이 아니라 문제를 푸는 데 읽어야 하는 정보다. Nature의 그림 지침은 그림
+# 안 글자를 5pt 밑으로 내리지 말라고 못박는다. 원본 자료의 글자가 9pt라면
+# 55%가 바닥이라는 뜻이다. 학원 교재는 중고등학생이 보므로 더 여유를 둔다.
+IMG_MIN = 0.65
+IMG_STEPS = (1.0, 0.92, 0.84, 0.76, 0.70, IMG_MIN)
 
 
-def fit(probe, parts, rect, ff, steps, lh, pad):
-    """칸에 들어가는 (글자 크기, 그림 배율)을 찾는다.
+def fit(probe, parts, rect, ff, steps, lh, pad, force_size=None):
+    """칸에 들어가는 (글자 크기, 그림 배율, 그래도 넘치는가)를 찾는다.
 
-    그림을 먼저 줄인다. 글자 크기는 교재 전체가 같아야 눈에 거슬리지 않으므로
-    마지막에 손댄다. 자료 그림이 있는 과학 문제에서 이 순서가 중요하다."""
+    그림을 먼저 줄이고 글자는 마지막에 손댄다. force_size를 주면 글자 크기를
+    그 값으로 고정하고 그림 배율만 맞춘다. 한 지면 안에서 문항마다 글자
+    크기가 다르면 학생은 그 차이를 뜻으로 읽는다."""
     limit = rect.y1 - pad
     has_img = any("img" in p for p in parts)
+    use = (force_size,) if force_size else steps
 
     def end_at(size, iscale):
         return pv.render_parts(probe, parts, rect.x0 + pad, rect.y0 + pad,
@@ -231,17 +238,30 @@ def fit(probe, parts, rect, ff, steps, lh, pad):
                                bodyfont=probe.font_for(ff, size),
                                iscale=iscale)
 
-    if end_at(steps[0], 1.0) <= limit:
-        return steps[0], 1.0
+    if end_at(use[0], 1.0) <= limit:
+        return use[0], 1.0, False
     if has_img:
         for iscale in IMG_STEPS[1:]:
-            if end_at(steps[0], iscale) <= limit:
-                return steps[0], iscale
-    small = IMG_STEPS[-1] if has_img else 1.0
-    for size in steps[1:]:
+            if end_at(use[0], iscale) <= limit:
+                return use[0], iscale, False
+    small = IMG_MIN if has_img else 1.0
+    for size in use[1:]:
         if end_at(size, small) <= limit:
-            return size, small
-    return steps[-1], small
+            return size, small, False
+    # 여기까지 왔으면 더 줄이지 않는다. 뭉개는 대신 넘친다고 알린다
+    return use[-1], small, True
+
+
+def page_fit(probe, boxes, parts_of, ff, steps, lh, pad):
+    """지면 전체에서 쓸 글자 크기 하나를 정한다.
+
+    칸마다 따로 정하면 한 쪽 안에서 문항마다 크기가 달라진다. 가장 빡빡한
+    칸이 요구하는 크기를 지면 전체에 똑같이 쓴다."""
+    worst = steps[0]
+    for i, rect in boxes.items():
+        size, _, _ = fit(probe, parts_of[i], rect, ff, steps, lh, pad)
+        worst = min(worst, size)
+    return worst
 
 
 def build(src_path, pageno, slots, parts_of, out_path, fontpath="", pad=4.5,
@@ -276,12 +296,14 @@ def build(src_path, pageno, slots, parts_of, out_path, fontpath="", pad=4.5,
     # 크기를 재 볼 곳. 같은 문서에 만들었다 지우면 페이지 참조가 무효가 된다
     scratch = fitz.open()
     probe = PdfCanvas(scratch.new_page(width=page.rect.width, height=page.rect.height))
+    page_size = page_fit(probe, boxes, parts_of, ff, steps, lh, pad)
     shrunk = []
     for i, rect in boxes.items():
         parts = parts_of[i]
-        size, iscale = fit(probe, parts, rect, ff, steps, lh, pad)
-        if size != steps[0] or iscale < 1.0:
-            shrunk.append((i, size, iscale))
+        size, iscale, over = fit(probe, parts, rect, ff, steps, lh, pad,
+                                 force_size=page_size)
+        if size != steps[0] or iscale < 1.0 or over:
+            shrunk.append((i, size, iscale, over))
         pv.render_parts(cv, parts, rect.x0 + pad, rect.y0 + pad,
                         rect.width - pad * 2, px=size,
                         mkfont=cv.mkfont, lh=lh, bodyfont=cv.font_for(ff, size),
