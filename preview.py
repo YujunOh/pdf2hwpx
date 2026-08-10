@@ -436,7 +436,9 @@ def render_parts(cv, parts, x, y, w, px=13, fill="#111111", tags=("body",), lh=1
                 continue
             # 칸 폭을 꽉 채우면 좌우 여백이 없어 답답하다. 디자인에서 자료는
             # 보통 본문보다 조금 좁다
-            want = w * min(max(p.get("pct", 88), 5), 100) / 100.0 * iscale
+            # 칸 폭을 꽉 채우면 경계선에 닿아 답답하다. 수능 문제지에서 잰
+            # 블록 그림 34개의 최대가 판면의 99.2% 였다
+            want = w * min(max(p.get("pct", 99), 5), 99) / 100.0 * iscale
             nat = iw * 72.0 / 96.0            # 화면 해상도 기준으로 pt 환산
             dw = min(want, nat) if nat > 0 else want
             dh = dw * ih / float(iw)
@@ -466,10 +468,14 @@ def render_parts(cv, parts, x, y, w, px=13, fill="#111111", tags=("body",), lh=1
     for ln in lines:
         if ln and ln[0][0] == "img":
             _, path, dw, dh, _ = ln[0]
+            # 위 간격이 없어서 본문 마지막 줄에 그림이 바로 붙어 있었다.
+            # 수능 문제지 실측이 본문 다음 0.84줄, 그림 다음 0.56줄이다
+            cy += px * 0.84
             if drawimg is not None:
-                # 칸 가운데에 놓는다. 왼쪽에 붙이면 그래프가 한쪽으로 쏠려 보인다
+                # 칸 가운데에 놓는다. 수능 블록 그림 34개 중 26개가 좌우
+                # 여백 차 2pt 이내였다. 오차가 아니라 의도된 가운데 정렬이다
                 drawimg(x + max((w - dw) / 2.0, 0), cy, dw, dh, path, tags)
-            cy += dh + px * 0.35
+            cy += dh + px * 0.56
             continue
         above = max([c[3] for c in ln], default=px * 0.78)
         below = max([c[4] for c in ln], default=px * 0.24)

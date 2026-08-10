@@ -1,6 +1,7 @@
 # 이 PC에서만 쓰는 상태 파일. 최근에 연 파일 경로가 들어 있다
 recent.json
 keys.json
+fontcheck.json
 
 __pycache__/
 *.pyc

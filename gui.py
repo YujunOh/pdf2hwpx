@@ -384,7 +384,7 @@ class App:
         가운데 %가 엉뚱한 모양으로 그려지거나 원문자를 복사하면 다른 글자가
         나오는 것들이 있다."""
         try:
-            table = pp.korean_fonts()
+            table = pp.korean_fonts(cache_dir=core.work_dir())
         except Exception:
             return
         good = sorted(n for n, v in table.items() if v[1])
@@ -401,7 +401,10 @@ class App:
             self.say("한글 폰트 %d종. 그 중 %d종은 글자가 어긋나 △ 를 달았습니다."
                      % (len(names), len(bad)))
             if bad:
-                self.say("  △ 폰트는 %% 나 원문자가 다르게 나올 수 있습니다.")
+                self.say("  △ 폰트는 괄호나 %% 가 검은 상자로 나오거나 아예 안 찍힙니다.")
+                if any("Pretendard" in n for n in bad):
+                    self.say("  Pretendard 는 OTF 라 걸립니다. TTF 판을 받아 설치하면 쓸 수 있습니다.")
+                    self.say("  github.com/orioncactus/pretendard/releases")
         try:
             self.root.after(0, apply)
         except Exception:

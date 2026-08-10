@@ -68,8 +68,67 @@ def installed_fonts():
     return out
 
 
-# 교재에 실제로 나오는 글자들. 이게 어긋나면 인쇄물이 틀린다
-PROBE = "60% ± ≥ ① ② ㈜ ℃ ㎡"
+# 교재에 실제로 나오는 글자들. 이게 어긋나면 인쇄물이 틀린다.
+# 괄호와 붙임표를 꼭 넣는다. OTF가 깨질 때 제일 먼저 사라지는 것들인데
+# 문제마다 나온다
+PROBE = "60% (2)-1 ± ≥ ① ② ㈜ ℃ ㎡"
+
+# 한 글리프에 여러 코드포인트가 걸린 것들. 그대로 두면 화면은 멀쩡한데
+# 복사하면 다른 글자가 나온다. ① 을 복사했더니 ➀ 이 나오는 식이다.
+# 쓰기 전에 대표 코드포인트로 통일한다
+NORMALIZE = {0x00A0: " ", 0x2206: "Δ", 0x2126: "Ω"}
+for _i in range(10):                      # ➀~➉ -> ①~⑩
+    NORMALIZE[0x2780 + _i] = chr(0x2460 + _i)
+for _i in range(0x3163 - 0x3131 + 1):     # 반각 자모 -> 온각
+    NORMALIZE[0xFFA1 + _i] = chr(0x3131 + _i)
+
+
+def normalize(text):
+    return text.translate(NORMALIZE)
+
+
+# 글자 한 자를 찍었을 때 정상적인 잉크 비율. 맑은 고딕 0.050, Hancom 0.056,
+# Pretendard TTF 0.058 이었다. 엉뚱한 글리프가 나오면 검은 배지가 그려져
+# 0.19~0.21 로 뛴다. 아예 안 그려지면 0 이 된다
+INK_MAX = 0.10
+INK_MIN = 0.002
+INK_CHARS = "%(-"        # 이 셋이면 갈린다. 여섯 자를 다 보면 두 배 느리다
+
+
+def ink_ratio(path, ch):
+    """이 글자를 찍었을 때 검은 픽셀이 차지하는 비율."""
+    doc = fitz.open()
+    page = doc.new_page(width=64, height=64)
+    tw = fitz.TextWriter(page.rect)
+    tw.append(fitz.Point(12, 48), ch, font=fitz.Font(fontfile=path), fontsize=36)
+    tw.write_text(page)
+    try:
+        doc.subset_fonts()
+    except Exception:
+        pass
+    data = doc.tobytes()
+    doc.close()
+    chk = fitz.open("pdf", data)
+    pix = chk[0].get_pixmap(dpi=96, colorspace=fitz.csGRAY)
+    chk.close()
+    s = pix.samples
+    return sum(1 for v in s if v < 128) / float(len(s))
+
+
+def draws_ok(path):
+    """글자가 제대로 그려지는지. 추출만 봐서는 못 잡는다.
+
+    Pretendard OTF 로 여는 괄호를 찍으면 검은 배지가 그려지고 붙임표는
+    아예 안 그려진다. 그런데 텍스트를 뽑아 보면 멀쩡하게 나온다. 화면과
+    추출이 따로 노는 것이라 눈으로 보는 수밖에 없다."""
+    try:
+        for ch in INK_CHARS:
+            r = ink_ratio(path, ch)
+            if r > INK_MAX or r < INK_MIN:
+                return False
+        return True
+    except Exception:
+        return False
 
 
 def glyphs_ok(path):
@@ -84,26 +143,66 @@ def glyphs_ok(path):
         tw = fitz.TextWriter(page.rect)
         tw.append(fitz.Point(20, 50), PROBE, font=fitz.Font(fontfile=path), fontsize=14)
         tw.write_text(page)
+        # build()가 서브셋을 걸므로 검사도 걸어야 한다. 안 걸면 검사는
+        # 통과하는데 실제 출력물에서 괄호와 % 가 사라지는 폰트가 빠져나간다
+        try:
+            doc.subset_fonts()
+        except Exception:
+            pass
         got = doc.tobytes()
         doc.close()
         chk = fitz.open("pdf", got)
-        back = chk[0].get_text().strip().replace(" ", " ")
+        back = normalize(chk[0].get_text().strip())
         chk.close()
         return back == PROBE
     except Exception:
         return False
 
 
-def korean_fonts():
-    """쓸 수 있는 한글 폰트. {이름: (경로, 글자가 제대로 나오는가)}"""
-    ok = {}
+def _cache_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "fontcheck.json")
+
+
+def korean_fonts(cache_dir=""):
+    """쓸 수 있는 한글 폰트. {이름: (경로, 글자가 제대로 나오는가)}
+
+    폰트마다 실제로 찍어 보므로 처음에는 30초쯤 걸린다. 판정을 파일에
+    적어 두고 다음부터는 건너뛴다. 폰트가 바뀌면 크기와 시각이 달라져
+    저절로 다시 잰다."""
+    import json
+    cpath = os.path.join(cache_dir, "fontcheck.json") if cache_dir else _cache_path()
+    cache = {}
+    try:
+        cache = json.load(open(cpath, encoding="utf-8"))
+    except Exception:
+        pass
+
+    ok, dirty = {}, False
     for label, path in installed_fonts().items():
         try:
+            st = os.stat(path)
+            key = "%s|%d|%d" % (path, st.st_size, int(st.st_mtime))
+            if key in cache:
+                if cache[key] is not None:
+                    ok[label] = (path, cache[key])
+                continue
             f = fitz.Font(fontfile=path)
-            if f.has_glyph(ord("한")) and f.has_glyph(ord("긿")):
-                ok[label] = (path, glyphs_ok(path))
+            if not (f.has_glyph(ord("한")) and f.has_glyph(ord("긿"))):
+                cache[key] = None          # 한글이 없는 폰트. 다시 재지 않는다
+                dirty = True
+                continue
+            good = glyphs_ok(path) and draws_ok(path)
+            cache[key] = good
+            dirty = True
+            ok[label] = (path, good)
         except Exception:
             continue
+    if dirty:
+        try:
+            json.dump(cache, open(cpath, "w", encoding="utf-8"),
+                      ensure_ascii=False, indent=1)
+        except Exception:
+            pass
     return ok
 
 
@@ -183,7 +282,7 @@ class PdfCanvas:
         tw = self._tw.get(fill)
         if tw is None:
             tw = self._tw[fill] = fitz.TextWriter(self.page.rect)
-        tw.append(fitz.Point(x, y), text, font=font.face, fontsize=font.px)
+        tw.append(fitz.Point(x, y), normalize(text), font=font.face, fontsize=font.px)
 
     def create_line(self, x1, y1, x2, y2, fill="#111111", tags=(), width=0.7):
         self.page.draw_line(fitz.Point(x1, y1), fitz.Point(x2, y2),
