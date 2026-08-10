@@ -461,12 +461,68 @@ class App:
             m.grab_release()
 
     def layout_all_pages(self):
-        """지금 칸 배치를 이 PDF의 모든 쪽에 적용해 한 번에 뽑는다."""
+        """지금 칸 배치로 원고를 여러 쪽에 흘려 넣고 한 번에 뽑는다.
+
+        교재는 한 쪽짜리가 아니다. 원고를 쭉 부어 넣고 한 번에 뽑아야
+        쓸모가 있다. 문항 번호는 우리가 넣지 않는다. 디자인에 이미
+        박혀 있고 순서대로 넣으면 저절로 맞는다."""
         if not self.slots:
             messagebox.showwarning("", "먼저 칸을 잡으세요.")
             return
-        messagebox.showinfo("", "아직 만들지 않았습니다.\n"
-                                "여러 쪽 한 번에 처리는 다음 차례입니다.")
+        if not self.problems:
+            messagebox.showwarning("", "먼저 원고를 불러오세요.\n"
+                                       "Ctrl+Shift+O 로 hwp, hwpx, txt 를 엽니다.")
+            return
+        try:
+            doc = fitz.open(self.pdf_path.get())
+            total = doc.page_count
+            doc.close()
+        except Exception:
+            self.say(traceback.format_exc()); return
+
+        per = len(self.slots)
+        start = self.pageno.get()                      # 1부터
+        need = (len(self.problems) + per - 1) // per
+        last = min(start + need - 1, total)
+        pages = last - start + 1
+        if pages <= 0:
+            messagebox.showwarning("", "넣을 쪽이 없습니다.")
+            return
+        fit_n = pages * per
+        msg = ("%d쪽부터 %d쪽까지 %d쪽에 문항 %d개를 넣습니다.\n"
+               "한 쪽에 %d개씩입니다.\n\n"
+               "지금 칸 배치를 모든 쪽에 그대로 씁니다. 쪽마다 칸 모양이\n"
+               "다른 교재라면 쪽을 나눠 따로 하세요."
+               % (start, last, pages, min(len(self.problems), fit_n), per))
+        if fit_n < len(self.problems):
+            msg += "\n\n쪽이 모자라 문항 %d개는 빠집니다." % (len(self.problems) - fit_n)
+        if not messagebox.askyesno("여러 쪽 만들기", msg):
+            return
+
+        jobs = []
+        for k in range(pages):
+            chunk = self.problems[k * per:(k + 1) * per]
+            parts_of = {}
+            for i, prob in enumerate(chunk):
+                parts_of[i] = parse_markup(ms.parts_to_markup(prob["parts"]))
+            if parts_of:
+                jobs.append((start - 1 + k, self.slots, parts_of))
+        out = os.path.join(OUTDIR, "교재.pdf")
+        try:
+            rep = pp.build_book(self.pdf_path.get(), jobs, out,
+                                fontpath=self.picked_font(),
+                                base_size=self.bodysize.get(), lh=self.leading)
+        except Exception:
+            self.say(traceback.format_exc()); return
+        info = pp.report(out)
+        self.say("교재 %d쪽을 만들었습니다: %s (%.0f KB)"
+                 % (len(jobs), out, info["bytes"] / 1024))
+        for pno in sorted(rep):
+            for i, size, iscale, over in rep[pno]:
+                if over:
+                    self.say("  %d쪽 슬롯%d 는 더 줄여도 안 들어갑니다." % (pno + 1, i))
+        self.announce(out, "%d쪽 · %.0f KB" % (len(jobs), info["bytes"] / 1024))
+        os.startfile(out)
 
     def _place_sash(self):
         try:

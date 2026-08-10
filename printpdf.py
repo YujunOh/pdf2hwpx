@@ -363,34 +363,19 @@ def page_fit(probe, boxes, parts_of, ff, steps, lh, pad):
     return worst
 
 
-def build(src_path, pageno, slots, parts_of, out_path, fontpath="", pad=4.5,
-          base_size=None, lh=1.55):
-    """slots는 [(x, y, w, h)] pt 좌표, parts_of는 {슬롯번호: parts}.
-
-    parts는 manuscript가 만드는 그 형식이다. {"t": 글}, {"eq": 수식}, {"br": True}.
-    수식은 이미지가 아니라 벡터 글자와 선으로 그려진다.
-
-    돌려주는 값은 (슬롯번호, 크기) 목록이다. 기본 크기로 다 들어갔으면 빈 리스트,
-    크기가 0이면 제일 작게 해도 넘쳤다는 뜻이다."""
-    src = fitz.open(src_path)
+def _one_page(src, pageno, slots, parts_of, out, ff, steps, lh, pad):
+    """원본 한 쪽을 새 문서에 얹고 그 위에 글을 그린다. 줄인 칸 목록을 돌려준다."""
     page = src[pageno]
-
     boxes = {}
     for i, (x, y, w, h) in enumerate(slots):
         if parts_of.get(i):
             boxes[i] = fitz.Rect(x, y, x + w, y + h)
     wipe(page, list(boxes.values()))
 
-    out = fitz.open()
     np_ = out.new_page(width=page.rect.width, height=page.rect.height)
     # 원본을 벡터 그대로 얹는다. 여기가 무손실인 지점이다
     np_.show_pdf_page(np_.rect, src, pageno)
 
-    ff = font_file(fontpath)
-    steps = STEPS
-    if base_size:
-        # 고른 크기에서 시작해 필요한 만큼만 줄인다
-        steps = tuple(x for x in (base_size,) + STEPS if x <= base_size) or (base_size,)
     cv = PdfCanvas(np_)
     # 크기를 재 볼 곳. 같은 문서에 만들었다 지우면 페이지 참조가 무효가 된다
     scratch = fitz.open()
@@ -407,8 +392,29 @@ def build(src_path, pageno, slots, parts_of, out_path, fontpath="", pad=4.5,
                         rect.width - pad * 2, px=size,
                         mkfont=cv.mkfont, lh=lh, bodyfont=cv.font_for(ff, size),
                         drawimg=cv.drawimg, iscale=iscale)
-
     cv.flush()
+    scratch.close()
+    return shrunk
+
+
+def _steps_from(base_size):
+    if not base_size:
+        return STEPS
+    return tuple(x for x in (base_size,) + STEPS if x <= base_size) or (base_size,)
+
+
+def build(src_path, pageno, slots, parts_of, out_path, fontpath="", pad=4.5,
+          base_size=None, lh=1.55):
+    """slots는 [(x, y, w, h)] pt 좌표, parts_of는 {슬롯번호: parts}.
+
+    parts는 manuscript가 만드는 그 형식이다. {"t": 글}, {"eq": 수식}, {"br": True}.
+    수식은 이미지가 아니라 벡터 글자와 선으로 그려진다.
+
+    돌려주는 값은 (슬롯번호, 크기, 그림배율, 넘침) 목록이다."""
+    src = fitz.open(src_path)
+    out = fitz.open()
+    shrunk = _one_page(src, pageno, slots, parts_of, out,
+                       font_file(fontpath), _steps_from(base_size), lh, pad)
     # 서브셋을 안 걸면 맑은 고딕 한 벌이 통째로 들어가 9MB가 붙는다
     try:
         out.subset_fonts()
@@ -416,9 +422,37 @@ def build(src_path, pageno, slots, parts_of, out_path, fontpath="", pad=4.5,
         pass
     out.save(out_path, garbage=4, deflate=True, clean=True)
     out.close()
-    scratch.close()
     src.close()
     return shrunk
+
+
+def build_book(src_path, jobs, out_path, fontpath="", pad=4.5,
+               base_size=None, lh=1.55):
+    """여러 쪽을 한 문서로 뽑는다. jobs는 [(쪽번호0based, slots, parts_of), ...].
+
+    교재는 한 쪽짜리가 아니다. 원고를 쭉 흘려 넣고 한 번에 뽑아야 쓸모가 있다.
+    문항 번호는 우리가 넣지 않는다. 디자인에 이미 박혀 있고, 원고를 순서대로
+    칸에 넣으면 저절로 맞는다.
+
+    돌려주는 값은 {쪽번호: 줄인 칸 목록} 이다."""
+    src = fitz.open(src_path)
+    out = fitz.open()
+    ff, steps = font_file(fontpath), _steps_from(base_size)
+    report_by_page = {}
+    for pageno, slots, parts_of in jobs:
+        if pageno < 0 or pageno >= src.page_count:
+            continue
+        sh = _one_page(src, pageno, slots, parts_of, out, ff, steps, lh, pad)
+        if sh:
+            report_by_page[pageno] = sh
+    try:
+        out.subset_fonts()
+    except Exception:
+        pass
+    out.save(out_path, garbage=4, deflate=True, clean=True)
+    out.close()
+    src.close()
+    return report_by_page
 
 
 def report(path):
