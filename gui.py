@@ -166,6 +166,7 @@ class App:
         self.side = tk.StringVar(value="우면")
         self.showgrid = tk.BooleanVar(value=True)
         self.zoomsel = tk.BooleanVar(value=False)
+        self.striptext = tk.BooleanVar(value=True)
         self.shapes, self.slots, self.texts = [], [], {}
         self.sel = 0
         self.page_w, self.page_h = 595.276, 841.89
@@ -178,6 +179,7 @@ class App:
         self.log_shown = True
         self.keys, self.keys_path = load_keys()
         self._help = None
+        self._text_boxes = []
         self.result_imgs = []
         self._build()
 
@@ -216,6 +218,8 @@ class App:
                         command=self.redraw).pack(side="left")
         ttk.Checkbutton(bar, text="선택 슬롯 확대", variable=self.zoomsel,
                         command=self.redraw).pack(side="left", padx=8)
+        ttk.Checkbutton(bar, text="칸 안 원본 글자 빼기", variable=self.striptext,
+                        command=self.redraw).pack(side="left")
         self.status = ttk.Label(bar, text="", foreground="#555555")
         self.status.pack(side="right")
 
@@ -347,6 +351,8 @@ class App:
             key = (path, pno, self.side.get())
             changed = getattr(self, "_target", None) not in (None, key)
             self._target = key
+            self._text_boxes = [(t["x"], t["y"], t["x"] + t["w"], t["y"] + t["h"])
+                                for t in self.shapes if t["k"] == "text"]
             self.slots = self.detect_slots()
             dropped = self.sync_slots(clear=changed)
             if dropped:
@@ -420,9 +426,90 @@ class App:
                 boxes.append((x + 10, y + 34, w - 20, h - 44))
         b_ = sorted(boxes, key=lambda t: (round(t[1], 1), t[0]))
 
-        picked = a if len(a) >= len(b_) else b_
-        self._slot_mode = "헤더 띠" if picked is a else "빈 상자"
+        # (c) 큰 숫자만 덩그러니 있는 배치. 테두리도 색 띠도 없이 01 02 03 04로
+        # 자리를 나누는 디자인이 실제로 많다. 번호 아래를 칸으로 본다.
+        nums = []
+        for s in self.shapes:
+            if s["k"] != "text":
+                continue
+            t = s["s"].strip()
+            if s["size"] >= 14 and re.fullmatch(r"\d{1,3}", t):
+                nums.append({"x": s["x"], "y": s["y"], "h": s["h"], "n": int(t)})
+        c_ = []
+        if len(nums) >= 2:
+            nums.sort(key=lambda s: (round(s["y"], 1), s["x"]))
+            # 가까운 x끼리 한 열로 묶는다. 번호 폭 차이로 몇 pt씩 어긋난다
+            cols = []
+            for x in sorted(s["x"] for s in nums):
+                if not cols or x - cols[-1] > 24:
+                    cols.append(x)
+            if len(cols) > 1:
+                gaps = sorted(b - a2 for a2, b in zip(cols, cols[1:]))
+                colw = gaps[len(gaps) // 2] - 14      # 중앙값. 최소값을 쓰면 너무 좁다
+            else:
+                colw = W - 2 * cols[0]
+            for i, s in enumerate(nums):
+                below = [t["y"] for t in nums
+                         if t["y"] > s["y"] + 5 and abs(t["x"] - s["x"]) < 14]
+                bottom = (min(below) - 16) if below else (H - 46)
+                top = s["y"] + s["h"] + 6
+                if bottom - top <= 60:
+                    continue
+                # 같은 줄 오른쪽 이웃을 넘지 않게 폭을 자른다
+                right = [t["x"] for t in nums
+                         if abs(t["y"] - s["y"]) < 12 and t["x"] > s["x"] + 20]
+                wid = min(colw, (min(right) - s["x"] - 14) if right else colw)
+                c_.append((s["x"], top, max(wid, 80), bottom - top))
+            # 같은 자리가 두 번 잡히는 일이 있다
+            seen, uniq = set(), []
+            for t in c_:
+                k = (round(t[0]), round(t[1]))
+                if k not in seen:
+                    seen.add(k); uniq.append(t)
+            c_ = uniq
+
+        cands = [("헤더 띠", a), ("빈 상자", b_), ("번호 격자", c_)]
+        name, picked = max(cands, key=lambda t: len(t[1]))
+        self._slot_mode = name
         return picked
+
+    def shape_box(self, s):
+        if s["k"] == "curve":
+            xs = [q[0] for q in s["pts"]]; ys = [q[1] for q in s["pts"]]
+            return min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
+        if s["k"] == "rect":
+            return s["x"], s["y"], s["w"], s["h"]
+        if s["k"] == "line":
+            return (min(s["x1"], s["x2"]), min(s["y1"], s["y2"]),
+                    abs(s["x2"] - s["x1"]), abs(s["y2"] - s["y1"]))
+        return s["x"], s["y"], s.get("w", 0), s.get("h", 0)
+
+    def is_glyph_outline(self, s):
+        """Type3 폰트로 만든 PDF는 글자가 벡터 외곽선으로도 그려져 있다.
+        같은 글자가 텍스트로도 잡히므로 그대로 두면 이중으로 겹쳐 찍힌다."""
+        if s["k"] not in ("curve", "line"):
+            return False
+        x, y, w, h = self.shape_box(s)
+        if h >= 22 or w >= 60:
+            return False
+        cx, cy = x + w / 2.0, y + h / 2.0
+        for t in self._text_boxes:
+            if t[0] - 1 <= cx <= t[2] + 1 and t[1] - 1 <= cy <= t[3] + 1:
+                return True          # 텍스트가 이미 있는 자리다
+        return False
+
+    def covered_by_filled_slot(self, s):
+        """원본 텍스트가 이미 채운 칸 안에 있으면 그건 갈아 끼울 옛 내용이다.
+        디자인 시안에는 '내용을 입력하세요' 대신 실제 예시 문장이 들어 있어서,
+        그대로 두면 새 문제와 겹쳐 찍힌다."""
+        if not self.striptext.get():
+            return False
+        bx, by, bw, bh = self.shape_box(s)
+        cx, cy = bx + bw / 2.0, by + bh / 2.0
+        for x, y, w, h in self.slots:
+            if x - 2 <= cx <= x + w + 2 and y - 2 <= cy <= y + h + 2:
+                return True
+        return False
 
     # ------------------------------------------------------------ 미리보기
     def redraw(self):
@@ -459,6 +546,8 @@ class App:
 
         # 원본 도형을 그대로 그린다. 이게 HWPX에 들어갈 것이다.
         for s in self.shapes:
+            if self.striptext.get() and self.is_glyph_outline(s):
+                continue
             if s["k"] == "rect":
                 cv.create_rectangle(X(s["x"]), Y(s["y"]), X(s["x"] + s["w"]), Y(s["y"] + s["h"]),
                                     fill=s["fill"] or "", outline=s["stroke"] or "",
@@ -480,6 +569,8 @@ class App:
                         cv.create_line(flat, fill=s["stroke"] or "#000000",
                                        width=max((s["lw"] or 0.5) * sc, 1))
             else:
+                if self.covered_by_filled_slot(s):
+                    continue
                 # 맑은고딕은 실제 높이가 요청 크기의 1.36배라 원본 크기 그대로
                 # 그리면 줄 간격을 넘어 윗줄과 겹친다
                 fpx = s["size"] * sc * 0.78
@@ -988,6 +1079,8 @@ class App:
             table = core.StyleTable(core.base_charpr_count(tpl))
             xml, z = [], 0
             for s in self.shapes:
+                if self.striptext.get() and self.is_glyph_outline(s):
+                    continue
                 if s["k"] == "rect":
                     xml.append(core.rect_xml(s["x"], s["y"], s["w"], s["h"],
                                              fill=s["fill"], stroke=s["stroke"], lw=s["lw"], z=z))
@@ -999,6 +1092,9 @@ class App:
                     xml.append(core.curve_xml(s["pts"], fill=s["fill"], stroke=s["stroke"],
                                               lw=s["lw"], close=s.get("close", False), z=z))
                 else:
+                    if self.covered_by_filled_slot(s):
+                        z += 1
+                        continue
                     # 원본 글자의 폰트, 크기, 색을 그대로 재현한다
                     cp = table.from_span(s.get("font", ""), s["size"],
                                          int(s.get("color", "#000000")[1:], 16),

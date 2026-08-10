@@ -331,12 +331,19 @@ WEIGHTS = ("ExtraLight", "SemiBold", "ExtraBold", "UltraLight", "Regular",
            "Medium", "Light", "Bold", "Thin", "Black", "Heavy", "Normal")
 
 
+DEFAULT_FACE = "맑은 고딕"
+
+
 def normalize_font(name):
     """PDF 폰트 이름 -> (한글에 넣을 face 이름, bold 플래그)."""
     if not name:
-        return "함초롬바탕", False
+        return DEFAULT_FACE, False
     n = re.sub(r"^[A-Z]{6}\+", "", name)          # 서브셋 접두사 제거
-    n = n.split(",")[0]
+    n = n.split(",")[0].strip()
+    # PDFium 등이 만든 PDF는 폰트 이름 자리에 'Type3 (655 0 R)' 같은 내부
+    # 참조를 넣는다. 그대로 face에 쓰면 한글이 못 찾아 아무 폰트로 대체한다.
+    if not n or "(" in n or n.lower().startswith(("type1", "type3", "truetype")):
+        return DEFAULT_FACE, False
     if n in FONT_ALIAS:
         return FONT_ALIAS[n]
     base, weight = n, ""
