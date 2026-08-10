@@ -1,14 +1,22 @@
 # -*- coding: utf-8 -*-
 """ditda 교재 자동조판 실습 GUI
 
-왼쪽이 항상 미리보기다. HWPX에 들어갈 내용을 그대로 그리므로
-타이핑하는 동안 결과가 바로 보인다. 수식도 한글 없이 그린다.
+왼쪽이 항상 미리보기다. 배경은 PDF를 그대로 구운 이미지다. 도형을 하나씩
+다시 그리면 클리핑과 투명도와 글자 외곽선에서 계속 어긋나서, 원본을
+그대로 보여주는 쪽으로 바꿨다. 그 위에 슬롯과 새 글만 얹는다.
+
+'벡터 보기'를 켜면 예전처럼 도형을 그린다. HWPX에 무엇이 나갈지 확인용이다.
 
 본 제품은 한글과컴퓨터의 한글 문서 파일(.hwp) 공개 문서를 참고하여 개발하였습니다.
 """
 import json, os, re, sys, threading, traceback
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+
+try:
+    from PIL import Image, ImageTk
+except ImportError:
+    Image = ImageTk = None
 
 # 고해상도 화면에서 흐릿하지 않도록. 캡처 좌표도 이걸 켜야 논리와 물리가 맞는다.
 if sys.platform == "win32":
@@ -167,6 +175,10 @@ class App:
         self.showgrid = tk.BooleanVar(value=True)
         self.zoomsel = tk.BooleanVar(value=False)
         self.striptext = tk.BooleanVar(value=True)
+        self.showvec = tk.BooleanVar(value=False)
+        self._bg_key = None          # 배경 이미지 캐시. 같은 화면이면 다시 안 굽는다
+        self._bg_img = None
+        self._bg_photo = None
         self.shapes, self.slots, self.texts = [], [], {}
         self.sel = 0
         self.page_w, self.page_h = 595.276, 841.89
@@ -203,7 +215,7 @@ class App:
         self.pane = pane
 
         # --- 왼쪽: 항상 보이는 미리보기
-        lf = ttk.LabelFrame(pane, text="미리보기 (HWPX에 들어갈 내용 그대로)", padding=4)
+        lf = ttk.LabelFrame(pane, text="미리보기 (원본 디자인 위에 새로 넣은 글)", padding=4)
         pane.add(lf, weight=3)
         self.canvas = tk.Canvas(lf, bg="#e9e9ee", highlightthickness=0, width=560)
         self.canvas.pack(fill="both", expand=True)
@@ -220,6 +232,8 @@ class App:
                         command=self.redraw).pack(side="left", padx=8)
         ttk.Checkbutton(bar, text="칸 안 원본 글자 빼기", variable=self.striptext,
                         command=self.redraw).pack(side="left")
+        ttk.Checkbutton(bar, text="벡터 보기", variable=self.showvec,
+                        command=self.redraw).pack(side="left", padx=8)
         self.status = ttk.Label(bar, text="", foreground="#555555")
         self.status.pack(side="right")
 
@@ -515,6 +529,67 @@ class App:
         return False
 
     # ------------------------------------------------------------ 미리보기
+    def page_image(self, view, px_w):
+        """PDF 페이지를 그대로 구워 배경으로 쓴다.
+
+        도형을 하나씩 다시 그리는 것보다 이쪽이 정확하다. 클리핑, 투명도,
+        그라데이션, 글자 외곽선이 전부 원본대로 나온다.
+
+        채운 칸의 원본 글자는 지워야 새 글과 겹치지 않는다. 캔버스에서 흰
+        사각형으로 덮으면 무늬가 있는 칸에서 티가 나므로, 굽기 전에
+        redaction으로 글자만 뺀다. 배경 무늬는 살아남는다.
+
+        같은 화면이면 다시 굽지 않는다. 타이핑하는 동안은 캐시가 맞는다."""
+        if Image is None or px_w < 8:
+            return None
+        path = self.pdf_path.get()
+        if not path or not os.path.exists(path):
+            return None
+        vx0, vy0, vx1, vy1 = view
+        # 어느 칸을 지울지가 바뀌면 다시 구워야 한다
+        wipe = tuple(sorted(
+            tuple(round(v, 1) for v in self.slots[i])
+            for i in range(len(self.slots)) if self.texts.get(i, "").strip()
+        )) if self.striptext.get() else ()
+        key = (path, self.pageno.get(), self.side.get(), px_w,
+               tuple(round(v, 1) for v in view), wipe)
+        if key == self._bg_key and self._bg_img is not None:
+            return self._bg_img
+
+        doc = None
+        try:
+            doc = fitz.open(path)
+            pno = self.pageno.get() - 1
+            if pno >= doc.page_count:
+                return None
+            page = doc[pno]
+            clip = self.clip_of(page)
+            ox = clip[0] if clip else 0.0        # 슬롯 좌표는 반쪽 원점 기준이다
+            oy = clip[1] if clip else 0.0
+            if wipe:
+                for x, y, w, h in wipe:
+                    page.add_redact_annot(fitz.Rect(x + ox, y + oy,
+                                                    x + w + ox, y + h + oy))
+                # 이 PDF는 글자를 벡터 외곽선으로도 그린다. 텍스트 레이어만
+                # 지우면 외곽선이 남아 옛 글자가 그대로 보인다. 칸 안에
+                # 완전히 들어간 벡터까지 지운다
+                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE,
+                                      graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED)
+            z = px_w / max(vx1 - vx0, 1e-6)
+            pix = page.get_pixmap(matrix=fitz.Matrix(z, z),
+                                  clip=fitz.Rect(vx0 + ox, vy0 + oy,
+                                                 vx1 + ox, vy1 + oy),
+                                  alpha=False)
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        except Exception:
+            self.say(traceback.format_exc())
+            return None
+        finally:
+            if doc is not None:
+                doc.close()
+        self._bg_key, self._bg_img = key, img
+        return img
+
     def redraw(self):
         cv = self.canvas
         cv.delete("all")
@@ -533,6 +608,7 @@ class App:
             ox = (cw - vw * sc) / 2 - vx0 * sc
             oy = m - vy0 * sc
         else:
+            vx0, vy0, vx1, vy1 = 0.0, 0.0, self.page_w, self.page_h
             sc = min((cw - m * 2) / self.page_w, (ch - m * 2) / self.page_h)
             ox = (cw - self.page_w * sc) / 2
             oy = m
@@ -544,11 +620,20 @@ class App:
         def X(v): return ox + v * sc
         def Y(v): return oy + v * sc
 
-        cv.create_rectangle(X(0), Y(0), X(self.page_w), Y(self.page_h),
-                            fill="white", outline="#b9b9c4")
+        # 배경은 PDF를 그대로 구운 이미지다. 벡터 보기를 켰을 때만 직접 그린다
+        img = None
+        if not self.showvec.get():
+            img = self.page_image((vx0, vy0, vx1, vy1),
+                                  int(round((vx1 - vx0) * sc)))
+        if img is not None:
+            self._bg_photo = ImageTk.PhotoImage(img)
+            cv.create_image(X(vx0), Y(vy0), image=self._bg_photo, anchor="nw")
+        else:
+            cv.create_rectangle(X(0), Y(0), X(self.page_w), Y(self.page_h),
+                                fill="white", outline="#b9b9c4")
 
-        # 원본 도형을 그대로 그린다. 이게 HWPX에 들어갈 것이다.
-        for s in self.shapes:
+        # HWPX에 들어갈 도형. 배경을 구웠으면 그릴 필요가 없다
+        for s in (self.shapes if img is None else []):
             if self.striptext.get() and self.is_glyph_outline(s):
                 continue
             if s["k"] == "rect":
