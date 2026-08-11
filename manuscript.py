@@ -250,11 +250,23 @@ def split_problems(paras, drop_preamble=True):
     return out
 
 
-def load(path):
+def load(path, imgdir=""):
     """원고 파일 -> [{no, parts}, ...]
+
+    실제 강사 원고는 문제 하나가 표 한 행이고 본문에 번호가 없다.
+    그런 파일이면 표 구조로 자른다. 번호로 자르는 방식은 그 다음이다.
 
     번호를 하나도 못 찾으면 머리말 버리기가 원고를 통째로 날린다.
     그럴 때는 통으로 한 덩어리를 돌려주는 편이 낫다."""
+    if path.lower().endswith(".hwpx"):
+        try:
+            import hwpx_reader
+            if hwpx_reader.looks_like_problem_tables(path):
+                got = hwpx_reader.load(path, imgdir)
+                if got:
+                    return got
+        except Exception:
+            pass
     paras = load_paragraphs(path)
     out = split_problems(paras)
     if not out and any(p.get("text", "").strip() for p in paras):
@@ -266,7 +278,10 @@ def parts_to_markup(parts):
     """GUI 편집기에 넣을 문자열로. 달러 기호 사이가 수식이다."""
     out = []
     for p in parts:
-        if p.get("br"):
+        if "raw" in p:
+            # 표로 짜인 원고는 hwpx_reader 가 이미 마크업까지 만들어 준다
+            out.append(p["raw"])
+        elif p.get("br"):
             out.append("\n")
         elif "eq" in p:
             out.append("$%s$" % p["eq"])

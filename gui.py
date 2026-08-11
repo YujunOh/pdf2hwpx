@@ -1575,22 +1575,34 @@ class App:
 
     def _read_manuscript(self, p):
         try:
-            self.problems = ms.load(p)
+            # 원고에 든 그림은 작업 폴더 옆에 풀어 둔다. 원고마다 따로 담아야
+            # 다른 원고를 열었을 때 그림이 섞이지 않는다
+            imgdir = os.path.join(OUTDIR, "원고그림",
+                                  re.sub(r"[^\w가-힣.-]+", "_", os.path.basename(p))[:60])
+            self.problems = ms.load(p, imgdir)
         except Exception:
             self.say(traceback.format_exc())
             messagebox.showerror("", "원고를 읽지 못했습니다. 로그를 보세요.")
             return
         self.ms_path = p
         self.problist.delete(0, "end")
-        n_eq = 0
+        n_eq = n_img = 0
         for i, pr in enumerate(self.problems):
-            t = ms.parts_to_markup(pr["parts"]).replace("\n", " ")
-            n_eq += sum(1 for q in pr["parts"] if "eq" in q)
-            self.problist.insert("end", "%s. %s" % (pr["no"] or (i + 1), t[:70]))
-        self.mlabel.config(text="%s  문항 %d개, 수식 %d개"
-                                % (os.path.basename(p), len(self.problems), n_eq))
-        self.say("원고 읽음: %s (문항 %d, 수식 %d). 목록을 두 번 누르면 선택한 슬롯에 들어갑니다."
-                 % (os.path.basename(p), len(self.problems), n_eq))
+            t = ms.parts_to_markup(pr["parts"])
+            n_eq += t.count("$") // 2 + sum(1 for q in pr["parts"] if "eq" in q)
+            n_img += t.count("[[img:")
+            self.problist.insert("end", "%s. %s"
+                                 % (pr["no"] or (i + 1), " ".join(t.split())[:70]))
+        self.mlabel.config(text="%s  문항 %d개, 수식 %d개, 그림 %d개"
+                                % (os.path.basename(p), len(self.problems), n_eq, n_img))
+        if not self.problems:
+            self.say("문항을 찾지 못했습니다. 개념 정리 파일이거나 번호가 없는 원고일 수 있습니다.")
+            messagebox.showinfo("", "문항을 찾지 못했습니다.\n"
+                                    "문제 파일이 맞는지 확인해 보세요.\n"
+                                    "개념 정리 파일에는 문항이 없습니다.")
+            return
+        self.say("원고 읽음: %s (문항 %d, 수식 %d, 그림 %d). 목록을 두 번 누르면 고른 칸에 들어갑니다."
+                 % (os.path.basename(p), len(self.problems), n_eq, n_img))
 
     def put_problem(self, ev=None):
         s = self.problist.curselection()

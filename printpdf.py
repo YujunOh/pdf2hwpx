@@ -363,14 +363,24 @@ def page_fit(probe, boxes, parts_of, ff, steps, lh, pad):
     return worst
 
 
-def _one_page(src, pageno, slots, parts_of, out, ff, steps, lh, pad):
-    """원본 한 쪽을 새 문서에 얹고 그 위에 글을 그린다. 줄인 칸 목록을 돌려준다."""
-    page = src[pageno]
+def _boxes_of(slots, parts_of):
     boxes = {}
     for i, (x, y, w, h) in enumerate(slots):
         if parts_of.get(i):
             boxes[i] = fitz.Rect(x, y, x + w, y + h)
-    wipe(page, list(boxes.values()))
+    return boxes
+
+
+def _one_page(src, pageno, slots, parts_of, out, ff, steps, lh, pad, wiped=False):
+    """원본 한 쪽을 새 문서에 얹고 그 위에 글을 그린다. 줄인 칸 목록을 돌려준다.
+
+    wiped 면 지우기는 이미 끝난 상태다. 여러 쪽을 뽑을 때는 지우기를 다
+    끝낸 뒤에 얹어야 한다. 지우기와 얹기를 번갈아 하면 MuPDF가 원본 객체
+    번호를 잃고 source object number out of range 로 죽는다."""
+    page = src[pageno]
+    boxes = _boxes_of(slots, parts_of)
+    if not wiped:
+        wipe(page, list(boxes.values()))
 
     np_ = out.new_page(width=page.rect.width, height=page.rect.height)
     # 원본을 벡터 그대로 얹는다. 여기가 무손실인 지점이다
@@ -438,11 +448,17 @@ def build_book(src_path, jobs, out_path, fontpath="", pad=4.5,
     src = fitz.open(src_path)
     out = fitz.open()
     ff, steps = font_file(fontpath), _steps_from(base_size)
+    jobs = [j for j in jobs if 0 <= j[0] < src.page_count]
+
+    # 지우기를 먼저 다 끝낸다. 지우기와 얹기를 번갈아 하면 MuPDF가 원본
+    # 객체 번호를 잃는다
+    for pageno, slots, parts_of in jobs:
+        wipe(src[pageno], list(_boxes_of(slots, parts_of).values()))
+
     report_by_page = {}
     for pageno, slots, parts_of in jobs:
-        if pageno < 0 or pageno >= src.page_count:
-            continue
-        sh = _one_page(src, pageno, slots, parts_of, out, ff, steps, lh, pad)
+        sh = _one_page(src, pageno, slots, parts_of, out, ff, steps, lh, pad,
+                       wiped=True)
         if sh:
             report_by_page[pageno] = sh
     try:
