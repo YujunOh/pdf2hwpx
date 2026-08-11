@@ -223,6 +223,45 @@ def count_eq(parts):
 
 
 class App:
+    # ---- 쪽별 상태 -------------------------------------------------------
+    # slots 와 texts 를 지금 보고 있는 쪽의 것으로 바꿔치기한다. 이렇게 하면
+    # 이미 쓰인 자리 백 곳을 고치지 않고도 쪽마다 따로 남길 수 있다.
+    def page_key(self):
+        return (self.pdf_path.get(), self.pageno.get(), self.side.get())
+
+    def page_state(self, key=None):
+        k = key or self.page_key()
+        if k not in self.pages:
+            self.pages[k] = {"slots": [], "texts": {}}
+        return self.pages[k]
+
+    @property
+    def slots(self):
+        return self.page_state()["slots"]
+
+    @slots.setter
+    def slots(self, v):
+        self.page_state()["slots"] = list(v)
+
+    @property
+    def texts(self):
+        return self.page_state()["texts"]
+
+    @texts.setter
+    def texts(self, v):
+        self.page_state()["texts"] = dict(v)
+
+    def filled_pages(self):
+        """글이 하나라도 든 쪽 목록. (쪽번호, 채운 칸 수)"""
+        out = []
+        for (path, pno, side), st in sorted(self.pages.items(), key=lambda kv: kv[0][1]):
+            if path != self.pdf_path.get() or side != self.side.get():
+                continue
+            n = sum(1 for v in st["texts"].values() if v.strip())
+            if n:
+                out.append((pno, n))
+        return out
+
     def __init__(self, root):
         self.root = root
         root.title("ditda 교재 자동조판 실습")
@@ -253,7 +292,12 @@ class App:
         self.bad_fonts = set()
         self._psize = None       # 지면 글자 크기 캐시
         self._psize_key = None
-        self.shapes, self.slots, self.texts = [], [], {}
+        # 쪽마다 칸과 글을 따로 담는다. 예전에는 한 벌만 들고 있어서 1쪽을
+        # 채우고 2쪽으로 넘어가면 1쪽에 친 글이 그대로 날아갔다. 교재는
+        # 한 권이 작업 단위인데 도구가 한 쪽만 기억하고 있었다
+        self.pages = {}
+        self.shapes = []
+        self.texts = {}
         self.sel = 0
         self.page_w, self.page_h = 595.276, 841.89
         self._job = None
@@ -287,7 +331,8 @@ class App:
         ttk.Entry(top, textvariable=self.pdf_path).pack(side="left", padx=6, fill="x", expand=True)
         ttk.Button(top, text="찾아보기", command=self.pick).pack(side="left")
         ttk.Label(top, text=" 쪽").pack(side="left")
-        ttk.Spinbox(top, from_=1, to=999, width=4, textvariable=self.pageno).pack(side="left")
+        ttk.Spinbox(top, from_=1, to=999, width=4, textvariable=self.pageno,
+                    command=self.page_changed).pack(side="left")
         ttk.Combobox(top, textvariable=self.side, values=["전체", "좌면", "우면"],
                      width=5, state="readonly").pack(side="left", padx=4)
         ttk.Button(top, text="레이아웃 분석", command=self.analyze).pack(side="left", padx=(8, 0))
@@ -462,12 +507,52 @@ class App:
         m.add_command(label="칸 배치 저장 (.dlay)", command=self.save_layout)
         m.add_command(label="칸 배치 불러오기", command=self.load_layout)
         m.add_separator()
+        m.add_command(label="채운 쪽 전부 내보내기", command=self.build_filled)
+        m.add_separator()
         m.add_command(label="배분 미리 보기", command=self.dry_run)
         m.add_command(label="이 배치를 모든 쪽에 쓰기", command=self.layout_all_pages)
         try:
             m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
         finally:
             m.grab_release()
+
+    def build_filled(self):
+        """손으로 채워 둔 쪽을 전부 한 문서로 뽑는다.
+
+        원고를 흘려 넣는 일괄 만들기와 달리, 쪽마다 직접 손본 것을 그대로
+        낸다. 쪽별 상태가 남게 된 뒤에야 가능해진 경로다."""
+        done = self.filled_pages()
+        if not done:
+            messagebox.showinfo("", "글을 채운 쪽이 없습니다.\n"
+                                    "칸을 누르고 문제를 넣은 뒤에 눌러 주세요.")
+            return
+        jobs = []
+        for pno, _ in done:
+            st = self.page_state((self.pdf_path.get(), pno, self.side.get()))
+            if not st["slots"]:
+                continue
+            parts_of = {i: parse_markup(v) for i, v in st["texts"].items() if v.strip()}
+            if parts_of:
+                jobs.append((pno - 1, st["slots"], parts_of))
+        if not jobs:
+            messagebox.showinfo("", "내보낼 것이 없습니다.")
+            return
+        out = os.path.join(OUTDIR, "교재.pdf")
+        try:
+            rep = pp.build_book(self.pdf_path.get(), jobs, out,
+                                fontpath=self.picked_font(),
+                                base_size=self.bodysize.get(), lh=self.leading)
+        except Exception:
+            self.say(traceback.format_exc()); return
+        info = pp.report(out)
+        self.say("채워 둔 %d쪽을 뽑았습니다: %s (%.0f KB)"
+                 % (len(jobs), out, info["bytes"] / 1024))
+        for pno in sorted(rep):
+            for row in rep[pno]:
+                if row[3]:
+                    self.say("  %d쪽 칸%d 는 약 %d자 넘칩니다."
+                             % (pno + 1, row[0], row[4] if len(row) > 4 else 0))
+        self.announce(out, "%d쪽 · %.0f KB" % (len(jobs), info["bytes"] / 1024))
 
     def dry_run(self):
         """만들기 전에 어느 문항이 어느 칸에 가고 어디가 넘치는지 보여준다.
@@ -669,6 +754,12 @@ class App:
             self.pdf_path.set(p)
             self.analyze()
 
+    def page_changed(self):
+        """쪽을 넘기면 저절로 분석한다. 쪽마다 칸과 글이 따로 남으므로
+        오가도 잃는 것이 없다."""
+        if self.pdf_path.get() and os.path.exists(self.pdf_path.get()):
+            self.analyze()
+
     def open_dir(self):
         os.startfile(OUTDIR)
 
@@ -722,17 +813,19 @@ class App:
             n_l = sum(1 for s in self.shapes if s["k"] == "line")
             n_t = sum(1 for s in self.shapes if s["k"] == "text")
 
-            key = (path, pno, self.side.get())
-            changed = getattr(self, "_target", None) not in (None, key)
-            self._target = key
+            self._target = (path, pno, self.side.get())
             self._text_boxes = [(t["x"], t["y"], t["x"] + t["w"], t["y"] + t["h"])
                                 for t in self.shapes if t["k"] == "text"]
-            self.slots = self.detect_slots()
-            dropped = self.sync_slots(clear=changed)
+            # 이 쪽에 이미 잡아 둔 칸이 있으면 그대로 쓴다. 손으로 고쳐 둔
+            # 것을 다시 분석했다고 날리면 안 된다
+            keep = bool(self.slots)
+            if not keep:
+                self.slots = self.detect_slots()
+            dropped = self.sync_slots()
             if dropped:
-                self.say("  다른 쪽이라 입력해둔 글 %d개를 비웠습니다." % dropped
-                         if changed else
-                         "  칸이 줄어 넘치는 글 %d개를 버렸습니다." % dropped)
+                self.say("  칸이 줄어 넘치는 글 %d개를 버렸습니다." % dropped)
+            if keep:
+                self.say("  이 쪽에 잡아 둔 칸 %d개를 그대로 씁니다." % len(self.slots))
 
             self.info.config(text=(
                 "%.0f x %.0f mm   사각형 %d · 직선 %d · 원본텍스트 %d\n"
@@ -1553,8 +1646,20 @@ class App:
         return "break"
 
     def project_data(self):
+        """작업 전체를 담는다. 예전에는 지금 쪽 하나만 담아서, 여러 쪽을
+        채워 놓고 저장해도 한 쪽만 남았다."""
+        pages = {}
+        for (path, pno, side), st in self.pages.items():
+            if path != self.pdf_path.get() or side != self.side.get():
+                continue
+            if not st["slots"] and not any(v.strip() for v in st["texts"].values()):
+                continue
+            pages[str(pno)] = {"slots": [list(s) for s in st["slots"]],
+                               "texts": {str(k): v for k, v in st["texts"].items()}}
         return {
             "pdf": self.pdf_path.get(), "page": self.pageno.get(), "side": self.side.get(),
+            "pages": pages,
+            # 옛 판으로 열어도 지금 쪽은 살도록 남겨 둔다
             "slots": [list(s) for s in self.slots],
             "texts": {str(k): v for k, v in self.texts.items()},
             "manuscript": getattr(self, "ms_path", ""),
@@ -1663,17 +1768,33 @@ class App:
             self.leading = saved_lead
         if not self.shapes:
             self.say("  도형이 없습니다. 이대로 만들면 글만 들어갑니다.")
-        self.slots = [tuple(s) for s in d.get("slots", [])]
-        self.texts = {int(k): v for k, v in d.get("texts", {}).items()}
+        side = self.side.get()
+        got = d.get("pages") or {}
+        if got:
+            for k, st in got.items():
+                key = (self.pdf_path.get(), int(k), side)
+                self.pages[key] = {
+                    "slots": [tuple(s) for s in st.get("slots", [])],
+                    "texts": {int(i): v for i, v in st.get("texts", {}).items()},
+                }
+        else:
+            # 옛 판 작업 파일. 한 쪽만 들어 있다
+            self.slots = [tuple(s) for s in d.get("slots", [])]
+            self.texts = {int(k): v for k, v in d.get("texts", {}).items()}
         self.sync_slots()
         mp = d.get("manuscript", "")
         if mp and os.path.exists(mp):
             self._read_manuscript(mp)
         self.select(0)
+        self._psize_key = None
         self.redraw()
         self.proj_path = p
-        self.say("작업 열기: %s (슬롯 %d, 채운 칸 %d)"
+        done = self.filled_pages()
+        self.say("작업 열기: %s (칸 %d, 채운 칸 %d)"
                  % (p, len(self.slots), sum(1 for v in self.texts.values() if v.strip())))
+        if len(done) > 1:
+            self.say("  글이 든 쪽: %s"
+                     % ", ".join("%d쪽 %d칸" % (pno, n) for pno, n in done))
 
     # ------------------------------------------------------------ 원고
     def load_manuscript(self):
