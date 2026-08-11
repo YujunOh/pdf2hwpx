@@ -403,6 +403,15 @@ class App:
         self.title = ttk.Label(top, text="", foreground="#55617a")
         self.title.pack(side="right")
 
+        self.prog = ttk.Frame(top)
+        self.proglabel = ttk.Label(self.prog, text="", foreground="#2f6fd0")
+        self.proglabel.pack(side="left", padx=(0, 6))
+        self.progbar = ttk.Progressbar(self.prog, length=140, mode="determinate")
+        self.progbar.pack(side="left")
+        ttk.Button(self.prog, text="멈춤", width=5,
+                   command=self.cancel_progress).pack(side="left", padx=4)
+        self._cancel = False
+
         # 산출물이 어디 생겼는지 알리는 자리. 로그를 안 보는 사람이 대부분이다
         self.resultbar = ttk.Frame(self.root, padding=(8, 4))
         self.rlabel = ttk.Label(self.resultbar, text="", foreground="#1a6b3a")
@@ -603,9 +612,15 @@ class App:
         try:
             rep = pp.build_book(self.pdf_path.get(), jobs, out,
                                 fontpath=self.picked_font(),
-                                base_size=self.bodysize.get(), lh=self.leading)
+                                base_size=self.bodysize.get(), lh=self.leading,
+                                progress=self.progress_cb(len(jobs), "내보내는 중"))
+        except pp.Cancelled:
+            self.say("내보내다가 멈췄습니다.")
+            self.end_progress(); return
         except Exception:
+            self.end_progress()
             self.say(traceback.format_exc()); return
+        self.end_progress()
         info = pp.report(out)
         self.say("채워 둔 %d쪽을 뽑았습니다: %s (%.0f KB)"
                  % (len(jobs), out, info["bytes"] / 1024))
@@ -638,7 +653,35 @@ class App:
         tv.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         tv.tag_configure("over", foreground="#c0392b")
         tv.tag_configure("small", foreground="#b9770e")
-        ttk.Button(w, text="닫기", command=w.destroy).pack(pady=(0, 10))
+
+        def goto(ev=None):
+            """행을 누르면 그 쪽으로 가서 그 칸을 고른다.
+
+            문제를 찾아 주고 고치러 가는 길을 안 주면 목록이 소용없다.
+            22쪽이 넘친다는 말을 듣고 스핀박스를 21번 눌러야 했다."""
+            sel = tv.selection()
+            if not sel:
+                return
+            v = tv.item(sel[0])["values"]
+            try:
+                pno, idx = int(v[0]), int(v[1])
+            except Exception:
+                return
+            self.pageno.set(pno)
+            self.page_changed()
+            if 0 <= idx < len(self.slots):
+                self.select(idx)
+            self.zoomsel.set(True)
+            self.redraw()
+            w.lift()
+
+        tv.bind("<Double-1>", goto)
+        tv.bind("<Return>", goto)
+        bar = ttk.Frame(w)
+        bar.pack(fill="x", pady=(0, 10), padx=10)
+        ttk.Label(bar, text="줄을 두 번 누르면 그 칸으로 갑니다.",
+                  foreground="#6b7689").pack(side="left")
+        ttk.Button(bar, text="닫기", command=w.destroy).pack(side="right")
         w.update()
 
         try:
@@ -773,9 +816,15 @@ class App:
         try:
             rep = pp.build_book(self.pdf_path.get(), jobs, out,
                                 fontpath=self.picked_font(),
-                                base_size=self.bodysize.get(), lh=self.leading)
+                                base_size=self.bodysize.get(), lh=self.leading,
+                                progress=self.progress_cb(len(jobs), "교재 만드는 중"))
+        except pp.Cancelled:
+            self.say("만들다가 멈췄습니다.")
+            self.end_progress(); return
         except Exception:
+            self.end_progress()
             self.say(traceback.format_exc()); return
+        self.end_progress()
         info = pp.report(out)
         self.say("교재 %d쪽을 만들었습니다: %s (%.0f KB)"
                  % (len(jobs), out, info["bytes"] / 1024))
@@ -836,6 +885,33 @@ class App:
             m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
         finally:
             m.grab_release()
+
+    def progress_cb(self, total, what):
+        """진행 막대를 띄우고 콜백을 돌려준다. 48쪽을 뽑는 동안 화면이
+        멈춘 것처럼 보이면 안 된다. 열 몇 초 넘는 일에는 막대와 멈춤이
+        같이 있어야 한다."""
+        self._cancel = False
+        self.prog.pack(side="right", padx=(8, 0))
+        self.progbar.config(maximum=max(total, 1), value=0)
+        self.proglabel.config(text=what)
+
+        def cb(i, note=""):
+            if self._cancel:
+                return False
+            self.progbar.config(value=i)
+            self.proglabel.config(text="%s  %d / %d%s"
+                                       % (what, i, total, "  " + note if note else ""))
+            self.root.update_idletasks()
+            return True
+        return cb
+
+    def end_progress(self):
+        self.prog.pack_forget()
+        self._cancel = False
+
+    def cancel_progress(self):
+        self._cancel = True
+        self.proglabel.config(text="멈추는 중...")
 
     def show_title(self):
         """지금 무엇을 열어 두었는지 위쪽에 적는다."""

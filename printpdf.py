@@ -482,8 +482,12 @@ def build(src_path, pageno, slots, parts_of, out_path, fontpath="", pad=4.5,
     return shrunk
 
 
+class Cancelled(Exception):
+    """사람이 멈췄다."""
+
+
 def build_book(src_path, jobs, out_path, fontpath="", pad=4.5,
-               base_size=None, lh=1.55):
+               base_size=None, lh=1.55, progress=None):
     """여러 쪽을 한 문서로 뽑는다. jobs는 [(쪽번호0based, slots, parts_of), ...].
 
     교재는 한 쪽짜리가 아니다. 원고를 쭉 흘려 넣고 한 번에 뽑아야 쓸모가 있다.
@@ -502,7 +506,10 @@ def build_book(src_path, jobs, out_path, fontpath="", pad=4.5,
         wipe(src[pageno], list(_boxes_of(slots, parts_of).values()))
 
     report_by_page = {}
-    for pageno, slots, parts_of in jobs:
+    for n, (pageno, slots, parts_of) in enumerate(jobs, 1):
+        if progress and not progress(n, "%d쪽" % (pageno + 1)):
+            out.close(); src.close()
+            raise Cancelled()
         sh = _one_page(src, pageno, slots, parts_of, out, ff, steps, lh, pad,
                        wiped=True)
         if sh:
