@@ -43,9 +43,9 @@ TXTSYM = {">=": "≥", "=>": "≥", "<=": "≤", "=<": "≤", "!=": "≠", "<>":
 
 # 이항 연산자. 앞뒤에 숨을 주지 않으면 x^2+4x+4 처럼 다 붙어 읽기 어렵다.
 # 조판 관례가 연산자 좌우에 여백을 두는 데는 이유가 있다
-BINOPS = set("+=<>±×÷≤≥≠≈≡→←∈∉⊂⊃∪∩")
-# 빼기는 음수 부호로도 쓰여서 따로 다룬다
-MINUS = "-−"
+BINOPS = set("+-−±×÷")
+# 등호와 부등호는 이항 연산자보다 넓게 띄운다. TeX 도 이 둘을 나눠 다룬다
+RELOPS = set("=<>≤≥≠≈≡→←∈∉⊂⊃")
 
 # 시그마와 곱은 첨자를 기호 위아래에 놓는다. 옆에 붙이면 지저분하다.
 # 적분은 옆에 놓는 것이 관례다
@@ -62,9 +62,15 @@ def stacked(node):
 
 
 def op_pad(node, px):
-    """이 노드가 이항 연산자면 좌우에 줄 여백."""
-    if node[0] == "txt" and node[1] in BINOPS:
-        return px * 0.20
+    """이 노드 좌우에 줄 여백.
+
+    TeX 은 이항 연산자(medmuskip)보다 관계 연산자(thickmuskip)를 넓게 띄운다.
+    같은 간격을 주면 a+b=c 에서 등호가 덧셈과 같은 무게로 읽힌다."""
+    if node[0] == "txt":
+        if node[1] in RELOPS:
+            return px * 0.26
+        if node[1] in BINOPS:
+            return px * 0.17
     if node[0] == "rm" and node[1] in ROMAN:
         return px * 0.10          # sin 2x 처럼 함수명 뒤가 붙지 않게
     return 0.0
@@ -230,6 +236,13 @@ class EqLayout:
         self._fonts = {}
         self._mk = mkfont          # PDF로 그릴 때는 폰트를 바깥에서 준다
 
+    def sub_px(self, px):
+        """첨자 크기. 끝없이 줄지 않게 바닥을 둔다.
+
+        곱셈만 하면 세 겹 첨자에서 글자가 사라진다. TeX 도 script,
+        scriptscript 두 단계에서 멈추고 더 줄이지 않는다."""
+        return max(px * 0.68, self.base * 0.44, 5.5)
+
     def font(self, px, italic=False, roman=False):
         """Cambria Math는 쓰지 않는다. 큰 괄호와 적분 기호를 담느라 폰트 메트릭의
         ascent와 descent가 극단적으로 커서, 22픽셀을 요청하면 123픽셀짜리 상자가
@@ -268,7 +281,7 @@ class EqLayout:
             return iw + px * 0.72, ia + px * 0.22, ib
         if k in ("sup", "sub"):
             bw, ba, bb = self.measure(node[1], px)
-            sw, sa, sb = self.measure(node[2], px * 0.68)
+            sw, sa, sb = self.measure(node[2], self.sub_px(px))
             if stacked(node[1]):
                 if k == "sup":
                     return max(bw, sw) + px * 0.16, ba + sa + sb + px * 0.08, bb
@@ -278,8 +291,8 @@ class EqLayout:
             return bw + sw + 1, ba, max(bb, bb * 0.5 + sa + sb)
         if k == "supsub":
             bw, ba, bb = self.measure(node[1], px)
-            uw, ua, ub = self.measure(node[2], px * 0.68)
-            lw, la, lb = self.measure(node[3], px * 0.68)
+            uw, ua, ub = self.measure(node[2], self.sub_px(px))
+            lw, la, lb = self.measure(node[3], self.sub_px(px))
             if stacked(node[1]):
                 return (max(bw, uw, lw) + px * 0.16,
                         ba + ua + ub + px * 0.08,
@@ -329,7 +342,7 @@ class EqLayout:
             self.draw(cv, node[1], x + sw + 1, y, px, fill, tags)
             return sw + iw + px * 0.2
         if k in ("sup", "sub"):
-            sp = px * 0.68
+            sp = self.sub_px(px)
             sw, sa, sb = self.measure(node[2], sp)
             if stacked(node[1]):
                 bw, ba, bb = self.measure(node[1], px)
@@ -347,7 +360,7 @@ class EqLayout:
             self.draw(cv, node[2], x + bw + 1, y + dy, sp, fill, tags)
             return bw + sw + 1
         if k == "supsub":
-            sp = px * 0.68
+            sp = self.sub_px(px)
             uw, ua, ub = self.measure(node[2], sp)
             lw, la, lb = self.measure(node[3], sp)
             if stacked(node[1]):
