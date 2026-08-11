@@ -180,6 +180,14 @@ def _line_parts(line, parts):
             parts.append({"t": tok})
 
 
+def readable(markup):
+    """목록에 보여줄 짧은 글. 마크업을 사람이 읽는 말로 바꾼다."""
+    t = IMG_RE.sub("[그림]", markup)
+    t = re.sub(r"\$[^$]*\$", "[수식]", t)
+    t = re.sub(r"\[\[/?(보기|자료)\]\]", "[보기]", t)
+    return " ".join(t.split())
+
+
 def parse_markup(text):
     """달러 기호 사이는 수식, 줄바꿈은 br, [[img:경로]] 는 그림.
 
@@ -454,11 +462,92 @@ class App:
         m.add_command(label="칸 배치 저장 (.dlay)", command=self.save_layout)
         m.add_command(label="칸 배치 불러오기", command=self.load_layout)
         m.add_separator()
+        m.add_command(label="배분 미리 보기", command=self.dry_run)
         m.add_command(label="이 배치를 모든 쪽에 쓰기", command=self.layout_all_pages)
         try:
             m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
         finally:
             m.grab_release()
+
+    def dry_run(self):
+        """만들기 전에 어느 문항이 어느 칸에 가고 어디가 넘치는지 보여준다.
+
+        인쇄물을 뽑고 나서 넘친 것을 발견하면 늦다. 원고를 고칠 사람에게는
+        몇 줄이 아니라 몇 자를 줄여야 하는지가 쓸모 있다."""
+        if not self.slots or not self.problems:
+            messagebox.showwarning("", "칸을 잡고 원고를 불러온 뒤에 눌러 주세요.")
+            return
+        w = tk.Toplevel(self.root)
+        w.title("배분 미리 보기")
+        w.geometry("860x560")
+        w.transient(self.root)
+        head = ttk.Label(w, text="세는 중입니다...", padding=(10, 8))
+        head.pack(anchor="w")
+        cols = ("쪽", "칸", "문항", "글자", "상태")
+        tv = ttk.Treeview(w, columns=cols, show="headings", height=20)
+        for c, width in zip(cols, (50, 50, 420, 70, 200)):
+            tv.heading(c, text=c)
+            tv.column(c, width=width, anchor="w" if c == "문항" else "center")
+        tv.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        tv.tag_configure("over", foreground="#c0392b")
+        tv.tag_configure("small", foreground="#b9770e")
+        ttk.Button(w, text="닫기", command=w.destroy).pack(pady=(0, 10))
+        w.update()
+
+        try:
+            doc = fitz.open(self.pdf_path.get())
+            total = doc.page_count
+            doc.close()
+        except Exception:
+            self.say(traceback.format_exc()); return
+
+        start = self.pageno.get()
+        taken, pno, nover = 0, start - 1, 0
+        while taken < len(self.problems) and pno < total:
+            slots = self.slots if pno == start - 1 else self.slots_of_page(pno)
+            if not slots:
+                pno += 1
+                continue
+            psize = None
+            rows = []
+            for i, (x, y, sw, sh) in enumerate(slots):
+                if taken >= len(self.problems):
+                    break
+                prob = self.problems[taken]
+                parts = parse_markup(ms.parts_to_markup(prob["parts"]))
+                size, iscale, over = self.fit_size(parts, sw, sh)
+                psize = size if psize is None else min(psize, size)
+                rows.append((i, prob, parts, sw, sh))
+                taken += 1
+            for i, prob, parts, sw, sh in rows:
+                size, iscale, over = self.fit_size(parts, sw, sh, force_size=psize)
+                body = readable(ms.parts_to_markup(prob["parts"]))
+                tag, note = "", ""
+                if over:
+                    per_line = max(sw / max(size, 1.0), 1.0)
+                    n = int(round(over / max(size * self.leading, 1.0) * per_line))
+                    note = "약 %d자 넘침" % n
+                    tag = "over"
+                    nover += 1
+                elif iscale < 1.0 and size < self.bodysize.get():
+                    note = "그림 %d%%, 글자 %.1fpt" % (round(iscale * 100), size)
+                    tag = "small"
+                elif iscale < 1.0:
+                    note = "그림 %d%%" % round(iscale * 100)
+                    tag = "small"
+                elif size < self.bodysize.get():
+                    note = "글자 %.1fpt" % size
+                    tag = "small"
+                else:
+                    note = "그대로 들어감"
+                tv.insert("", "end", tags=(tag,),
+                          values=(pno + 1, i, body[:70], len(body), note))
+            pno += 1
+        left = len(self.problems) - taken
+        msg = "문항 %d개 중 %d개 배분. 넘치는 칸 %d개." % (len(self.problems), taken, nover)
+        if left:
+            msg += "  쪽이 모자라 %d개는 못 넣었습니다." % left
+        head.config(text=msg)
 
     def layout_all_pages(self):
         """지금 칸 배치로 원고를 여러 쪽에 흘려 넣고 한 번에 뽑는다.
@@ -547,10 +636,16 @@ class App:
         if taken < len(self.problems):
             self.say("  쪽이 모자라 문항 %d개가 남았습니다. 끝 쪽을 늘리거나"
                      " 문제 지면이 더 있는 교재를 쓰세요." % (len(self.problems) - taken))
+        nover = 0
         for pno in sorted(rep):
-            for i, size, iscale, over in rep[pno]:
-                if over:
-                    self.say("  %d쪽 슬롯%d 는 더 줄여도 안 들어갑니다." % (pno + 1, i))
+            for row in rep[pno]:
+                if row[3]:
+                    nover += 1
+                    self.say("  %d쪽 슬롯%d 는 약 %d자 넘칩니다."
+                             % (pno + 1, row[0], row[4] if len(row) > 4 else 0))
+        if nover:
+            self.say("  넘치는 칸이 %d개입니다. 칸 배치 메뉴의 배분 미리 보기에서"
+                     " 어디를 줄여야 하는지 볼 수 있습니다." % nover)
         self.announce(out, "%d쪽 · %.0f KB" % (len(jobs), info["bytes"] / 1024))
         os.startfile(out)
 
@@ -1607,8 +1702,7 @@ class App:
             t = ms.parts_to_markup(pr["parts"])
             n_eq += t.count("$") // 2 + sum(1 for q in pr["parts"] if "eq" in q)
             n_img += t.count("[[img:")
-            self.problist.insert("end", "%s. %s"
-                                 % (pr["no"] or (i + 1), " ".join(t.split())[:70]))
+            self.problist.insert("end", "%s. %s" % (pr["no"] or (i + 1), readable(t)[:70]))
         self.mlabel.config(text="%s  문항 %d개, 수식 %d개, 그림 %d개"
                                 % (os.path.basename(p), len(self.problems), n_eq, n_img))
         if not self.problems:
@@ -1812,7 +1906,8 @@ class App:
                 size, iscale, over = self.fit_size(parts, w, h,
                                                    force_size=self.page_size())
                 if over:
-                    self.say("  슬롯%d 는 더 줄여도 안 들어갑니다. 글을 줄이거나 칸을 키우세요." % i)
+                    self.say("  슬롯%d 는 약 %d자 넘칩니다. 그만큼 줄이거나 칸을 키우세요."
+                             % (i, nch))
                 if iscale < 1.0:
                     self.say("  슬롯%d 그림을 %d%%로 줄여 맞췄습니다." % (i, iscale * 100))
                 if size < self.bodysize.get():
@@ -1867,7 +1962,9 @@ class App:
                      % (info["size_mm"][0], info["size_mm"][1], info["images"], info["chars"]))
             if info["images"] == 0:
                 self.say("  이미지 0개. 원본 디자인이 벡터 그대로 들어갔습니다.")
-            for i, size, iscale, over in shrunk:
+            for row in shrunk:
+                i, size, iscale, over = row[0], row[1], row[2], row[3]
+                nch = row[4] if len(row) > 4 else 0
                 bits = []
                 if iscale < 1.0:
                     bits.append("그림 %d%%" % round(iscale * 100))

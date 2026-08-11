@@ -367,17 +367,19 @@ def fit(probe, parts, rect, ff, steps, lh, pad, force_size=None):
                                iscale=iscale)
 
     if end_at(use[0], 1.0) <= limit:
-        return use[0], 1.0, False
+        return use[0], 1.0, 0.0
     if has_img:
         for iscale in IMG_STEPS[1:]:
             if end_at(use[0], iscale) <= limit:
-                return use[0], iscale, False
+                return use[0], iscale, 0.0
     small = IMG_MIN if has_img else 1.0
     for size in use[1:]:
         if end_at(size, small) <= limit:
-            return size, small, False
-    # 여기까지 왔으면 더 줄이지 않는다. 뭉개는 대신 넘친다고 알린다
-    return use[-1], small, True
+            return size, small, 0.0
+    # 여기까지 왔으면 더 줄이지 않는다. 뭉개는 대신 얼마나 넘쳤는지 알린다.
+    # 인디자인의 편집자용 앱도 "몇 글자 잘라내라"를 띄운다
+    over = end_at(use[-1], small) - limit
+    return use[-1], small, max(over, 0.0)
 
 
 def page_fit(probe, boxes, parts_of, ff, steps, lh, pad):
@@ -425,19 +427,29 @@ def _one_page(src, pageno, slots, parts_of, out, ff, steps, lh, pad, wiped=False
     scratch = fitz.open()
     probe = PdfCanvas(scratch.new_page(width=page.rect.width, height=page.rect.height))
     page_size = page_fit(probe, boxes, parts_of, ff, steps, lh, pad)
-    shrunk = []
+    shrunk, over_chars = [], []
     for i, rect in boxes.items():
         parts = parts_of[i]
         size, iscale, over = fit(probe, parts, rect, ff, steps, lh, pad,
                                  force_size=page_size)
         if size != steps[0] or iscale < 1.0 or over:
             shrunk.append((i, size, iscale, over))
+        if over:
+            # 넘친 만큼을 글자 수로 환산해 둔다. 몇 줄인지보다 몇 자인지가
+            # 원고를 고치는 사람에게 쓸모 있다
+            per_line = max((rect.width - pad * 2) / max(size, 1.0), 1.0)
+            lines_over = over / max(size * lh, 1.0)
+            over_chars.append((i, int(round(lines_over * per_line))))
         pv.render_parts(cv, parts, rect.x0 + pad, rect.y0 + pad,
                         rect.width - pad * 2, px=size,
                         mkfont=cv.mkfont, lh=lh, bodyfont=cv.font_for(ff, size),
                         drawimg=cv.drawimg, iscale=iscale)
     cv.flush()
     scratch.close()
+    for i, n in over_chars:
+        for k, row in enumerate(shrunk):
+            if row[0] == i:
+                shrunk[k] = row + (n,)
     return shrunk
 
 
