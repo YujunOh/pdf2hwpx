@@ -92,7 +92,7 @@ KEY_HELP = {
     "save": "작업 저장", "open": "작업 열기", "manuscript": "원고 불러오기",
     "analyze": "레이아웃 분석", "build": "HWPX 만들기", "verify": "한글로 확인",
     "buildpdf": "인쇄용 PDF",
-    "next_slot": "다음 슬롯", "prev_slot": "이전 슬롯",
+    "next_slot": "다음 칸", "prev_slot": "이전 칸",
     "circled": "원문자 순환 (3 누르고 눌러 ③)", "equation": "수식 넣기",
     "zoom": "확대 토글", "toggle_log": "로그 접기", "help": "도움말",
 }
@@ -306,7 +306,7 @@ class App:
         self.problems = []
         self.ms_path = ""
         self.proj_path = ""
-        self.log_shown = True
+        self.log_shown = False
         self.keys, self.keys_path = load_keys()
         self.recent = []
         try:
@@ -320,25 +320,88 @@ class App:
         self._text_boxes = []
         self.result_imgs = []
         self._build()
+        self._menubar()
         # 설치 폰트를 훑는 데 2초쯤 걸린다. 창을 띄운 뒤 뒤에서 채운다
         threading.Thread(target=self._load_fonts, daemon=True).start()
 
     # ------------------------------------------------------------ 화면
+    def _menubar(self):
+        """성격이 다른 명령이 상단에 같은 무게로 늘어서 있었다. 자주 쓰는
+        셋만 도구 모음에 남기고 나머지는 메뉴로 접는다."""
+        m = tk.Menu(self.root)
+        f = tk.Menu(m, tearoff=0)
+        f.add_command(label="교재 PDF 열기...", command=self.pick)
+        f.add_command(label="예제로 해보기", command=self.open_sample)
+        f.add_separator()
+        f.add_command(label="작업 열기...", accelerator="Ctrl+O", command=self.open_project)
+        f.add_command(label="작업 저장...", accelerator="Ctrl+S", command=self.save_project)
+        f.add_separator()
+        f.add_command(label="끝내기", command=self.root.destroy)
+        m.add_cascade(label="파일", menu=f)
+
+        v = tk.Menu(m, tearoff=0)
+        v.add_checkbutton(label="칸 경계", variable=self.showgrid, command=self.redraw)
+        v.add_checkbutton(label="고른 칸 확대", variable=self.zoomsel, command=self.redraw)
+        v.add_checkbutton(label="칸 안 원본 글자 빼기", variable=self.striptext,
+                          command=self.redraw)
+        v.add_checkbutton(label="벡터로 보기", variable=self.showvec, command=self.redraw)
+        v.add_separator()
+        v.add_command(label="자세한 기록 보이기/숨기기", accelerator="F9",
+                      command=self.key_toggle_log)
+        m.add_cascade(label="보기", menu=v)
+
+        p = tk.Menu(m, tearoff=0)
+        p.add_command(label="이 쪽 다시 분석", accelerator="F5", command=self.analyze)
+        p.add_separator()
+        p.add_command(label="기준 배치 저장...", command=self.save_layout)
+        p.add_command(label="기준 배치 불러오기...", command=self.load_layout)
+        m.add_cascade(label="쪽", menu=p)
+
+        g = tk.Menu(m, tearoff=0)
+        g.add_command(label="원고 불러오기...", accelerator="Ctrl+Shift+O",
+                      command=self.load_manuscript)
+        g.add_command(label="고른 칸부터 순서대로 채우기", command=self.autofill)
+        m.add_cascade(label="원고", menu=g)
+
+        e = tk.Menu(m, tearoff=0)
+        e.add_command(label="배분 미리 보기", command=self.dry_run)
+        e.add_separator()
+        e.add_command(label="이 쪽만 PDF로", accelerator="Ctrl+P", command=self.build_pdf)
+        e.add_command(label="채운 쪽 전부 PDF로", command=self.build_filled)
+        e.add_command(label="원고를 여러 쪽에 부어 만들기", command=self.layout_all_pages)
+        e.add_separator()
+        e.add_command(label="한글 파일(HWPX)로", accelerator="Ctrl+B", command=self.build)
+        e.add_command(label="한글로 열어 확인", accelerator="F12", command=self.verify)
+        m.add_cascade(label="내보내기", menu=e)
+
+        h = tk.Menu(m, tearoff=0)
+        h.add_command(label="도움말", accelerator="F1", command=self.show_help)
+        h.add_command(label="만든 파일이 있는 폴더", command=self.open_dir)
+        m.add_cascade(label="도움말", menu=h)
+        self.root.config(menu=m)
+
     def _build(self):
         top = ttk.Frame(self.root, padding=(8, 6))
         top.pack(fill="x")
-        ttk.Label(top, text="레이아웃 PDF").pack(side="left")
-        ttk.Entry(top, textvariable=self.pdf_path).pack(side="left", padx=6, fill="x", expand=True)
-        ttk.Button(top, text="찾아보기", command=self.pick).pack(side="left")
-        ttk.Label(top, text=" 쪽").pack(side="left")
+        # 자주 쓰는 것만 남긴다. 나머지는 메뉴로 접었다. 성격이 다른 명령이
+        # 같은 무게로 늘어서 있으면 무엇이 중요한지 알 수 없다
+        ttk.Button(top, text="원고 불러오기",
+                   command=self.load_manuscript).pack(side="left")
+        ttk.Button(top, text="배분 미리 보기",
+                   command=self.dry_run).pack(side="left", padx=6)
+        ttk.Button(top, text="내보내기 ▾",
+                   command=self.export_menu).pack(side="left")
+
+        ttk.Label(top, text="  쪽").pack(side="left", padx=(14, 0))
+        ttk.Button(top, text="◀", width=3, command=lambda: self.step_page(-1)).pack(side="left")
         ttk.Spinbox(top, from_=1, to=999, width=4, textvariable=self.pageno,
                     command=self.page_changed).pack(side="left")
-        ttk.Combobox(top, textvariable=self.side, values=["전체", "좌면", "우면"],
-                     width=5, state="readonly").pack(side="left", padx=4)
-        ttk.Button(top, text="레이아웃 분석", command=self.analyze).pack(side="left", padx=(8, 0))
-        ttk.Button(top, text="작업 열기", command=self.open_project).pack(side="left", padx=(10, 2))
-        ttk.Button(top, text="작업 저장", command=self.save_project).pack(side="left")
-        ttk.Button(top, text="칸 배치 ▾", command=self.layout_menu).pack(side="left", padx=(6, 0))
+        ttk.Button(top, text="▶", width=3, command=lambda: self.step_page(1)).pack(side="left")
+        self.pagenote = ttk.Label(top, text="", foreground="#6b7689")
+        self.pagenote.pack(side="left", padx=8)
+
+        self.title = ttk.Label(top, text="", foreground="#55617a")
+        self.title.pack(side="right")
 
         # 산출물이 어디 생겼는지 알리는 자리. 로그를 안 보는 사람이 대부분이다
         self.resultbar = ttk.Frame(self.root, padding=(8, 4))
@@ -424,11 +487,10 @@ class App:
         sf.pack(fill="both", expand=True, pady=6)
         row = ttk.Frame(sf)
         row.pack(fill="x")
-        ttk.Label(row, text="슬롯").pack(side="left")
-        self.slotsel = ttk.Combobox(row, width=8, state="readonly")
-        self.slotsel.pack(side="left", padx=4)
-        self.slotsel.bind("<<ComboboxSelected>>", self.switch_slot)
-        ttk.Button(row, text="예시", width=6, command=self.fill_sample).pack(side="left", padx=2)
+        self.sellabel = ttk.Label(row, text="칸을 누르세요", foreground="#2f6fd0")
+        self.sellabel.pack(side="left")
+        ttk.Button(row, text="예시", width=6,
+                   command=self.fill_sample).pack(side="left", padx=(10, 2))
         ttk.Button(row, text="전체 예시", width=9, command=self.fill_all).pack(side="left")
         ttk.Button(row, text="비우기", width=7, command=self.clear_slot).pack(side="left", padx=2)
 
@@ -449,15 +511,15 @@ class App:
 
         act = ttk.Frame(rf)
         act.pack(fill="x")
-        ttk.Button(act, text="인쇄용 PDF", command=self.build_pdf).pack(side="left")
-        ttk.Button(act, text="HWPX 만들기", command=self.build).pack(side="left", padx=6)
+        ttk.Button(act, text="인쇄용 PDF 만들기",
+                   command=self.build_pdf).pack(side="left")
         ttk.Button(act, text="한글로 열어 확인", command=self.verify).pack(side="left", padx=6)
         ttk.Button(act, text="결과 폴더", command=self.open_dir).pack(side="left")
         ttk.Button(act, text="도움말 F1", command=self.show_help).pack(side="right")
 
         self.log = tk.Text(self.root, height=4, font=("Consolas", 9),
                            bg="#1e1e1e", fg="#d4d4d4")
-        self.log.pack(fill="x", padx=8, pady=(0, 8))
+        # 처음에는 접어 둔다. 개발용 기록이 화면 반을 먹고 있었다
         self.bind_keys()
         self.say("준비됨.  F5 분석 · Ctrl+B 만들기 · Ctrl+S 저장 · Alt+I 원문자 순환 · F9 로그 접기")
         self.say("단축키는 %s 를 고치면 바뀝니다." % self.keys_path)
@@ -551,7 +613,7 @@ class App:
             for row in rep[pno]:
                 if row[3]:
                     self.say("  %d쪽 칸%d 는 약 %d자 넘칩니다."
-                             % (pno + 1, row[0], row[4] if len(row) > 4 else 0))
+                             % (pno + 1, row[0] + 1, row[4] if len(row) > 4 else 0))
         self.announce(out, "%d쪽 · %.0f KB" % (len(jobs), info["bytes"] / 1024))
 
     def dry_run(self):
@@ -726,13 +788,12 @@ class App:
             for row in rep[pno]:
                 if row[3]:
                     nover += 1
-                    self.say("  %d쪽 슬롯%d 는 약 %d자 넘칩니다."
-                             % (pno + 1, row[0], row[4] if len(row) > 4 else 0))
+                    self.say("  %d쪽 %d번째 칸은 약 %d자 넘칩니다."
+                             % (pno + 1, row[0] + 1, row[4] if len(row) > 4 else 0))
         if nover:
             self.say("  넘치는 칸이 %d개입니다. 칸 배치 메뉴의 배분 미리 보기에서"
                      " 어디를 줄여야 하는지 볼 수 있습니다." % nover)
         self.announce(out, "%d쪽 · %.0f KB" % (len(jobs), info["bytes"] / 1024))
-        os.startfile(out)
 
     def _place_sash(self):
         try:
@@ -753,6 +814,40 @@ class App:
         if p:
             self.pdf_path.set(p)
             self.analyze()
+
+    def step_page(self, d):
+        """쪽을 앞뒤로 넘긴다. 쪽마다 칸과 글이 따로 남으니 잃는 것이 없다."""
+        n = max(self.pageno.get() + d, 1)
+        self.pageno.set(n)
+        self.page_changed()
+
+    def export_menu(self):
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label="이 쪽만 PDF로", command=self.build_pdf)
+        m.add_command(label="채운 쪽 전부 PDF로", command=self.build_filled)
+        m.add_command(label="원고를 여러 쪽에 부어 만들기", command=self.layout_all_pages)
+        m.add_separator()
+        m.add_command(label="한글 파일(HWPX)로", command=self.build)
+        m.add_command(label="한글로 열어 확인", command=self.verify)
+        m.add_separator()
+        m.add_command(label="기준 배치 저장...", command=self.save_layout)
+        m.add_command(label="기준 배치 불러오기...", command=self.load_layout)
+        try:
+            m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
+        finally:
+            m.grab_release()
+
+    def show_title(self):
+        """지금 무엇을 열어 두었는지 위쪽에 적는다."""
+        p = self.pdf_path.get()
+        if not p:
+            self.title.config(text="")
+            return
+        done = self.filled_pages()
+        bits = [os.path.basename(p)]
+        if done:
+            bits.append("글이 든 쪽 %s" % ", ".join(str(q) for q, _ in done))
+        self.title.config(text="   ".join(bits))
 
     def page_changed(self):
         """쪽을 넘기면 저절로 분석한다. 쪽마다 칸과 글이 따로 남으므로
@@ -829,7 +924,7 @@ class App:
 
             self.info.config(text=(
                 "%.0f x %.0f mm   사각형 %d · 직선 %d · 원본텍스트 %d\n"
-                "이미지 0개 (래스터화 없음)   검출된 문제 슬롯 %d개"
+                "이미지 0개 (래스터화 없음)   찾은 문제 칸 %d개"
                 % (self.page_w * 25.4 / 72, self.page_h * 25.4 / 72, n_r, n_l, n_t, len(self.slots))))
             m = self.measure_body()
             if m:
@@ -838,10 +933,14 @@ class App:
                          % (m[0], m[1]))
             self.editor.delete("1.0", "end")
             self.editor.insert("1.0", self.texts.get(self.sel, ""))
-            self.say("분석 완료. 사각형 %d, 직선 %d, 원본텍스트 %d, 슬롯 %d개"
+            self.say("분석 완료. 사각형 %d, 직선 %d, 원본텍스트 %d, 문제 칸 %d개"
                      % (n_r, n_l, n_t, len(self.slots)))
             if not self.slots:
-                self.say("  슬롯이 안 잡혔습니다. 이 디자인은 헤더 바 조건이 다릅니다.")
+                self.say("  문제 칸을 못 찾았습니다. 빈 곳을 끌어서 직접 그려도 됩니다.")
+            n = sum(1 for v in self.texts.values() if v.strip())
+            self.pagenote.config(text="칸 %d개%s"
+                                      % (len(self.slots), " · 채움 %d" % n if n else ""))
+            self.show_title()
             self.redraw()
         except Exception:
             self.say(traceback.format_exc())
@@ -1322,8 +1421,8 @@ class App:
 
         filled = sum(1 for k, v in self.texts.items()
                      if k < len(self.slots) and v.strip())
-        self.status.config(text="%s %.0f%%   채운 슬롯 %d / %d"
-                                % ("슬롯%d 확대" % self.sel if zoom else "전체",
+        self.status.config(text="%s %.0f%%   채운 칸 %d / %d"
+                                % ("%d번째 칸 확대" % (self.sel + 1) if zoom else "전체",
                                    sc * 100, filled, len(self.slots)))
 
     # ------------------------------------------------------------ 슬롯 손질
@@ -1347,7 +1446,7 @@ class App:
     def select(self, i):
         self.sel = i
         if 0 <= i < len(self.slots):
-            self.slotsel.current(i)
+            self._show_sel()
         self.editor.delete("1.0", "end")
         self.editor.insert("1.0", self.texts.get(i, ""))
 
@@ -1391,7 +1490,8 @@ class App:
             self.texts.pop(len(self.slots) - 1, None)   # 옛 글을 물려받지 않게
             self.reindex()
             self.select(len(self.slots) - 1)
-            self.say("슬롯%d 추가 (%.0f x %.0f pt)" % (self.sel, rub[2], rub[3]))
+            self.say("%d번째 칸을 새로 그렸습니다 (%.0f x %.0f pt)"
+                 % (self.sel + 1, rub[2], rub[3]))
         self.redraw()
 
     def on_rclick(self, ev):
@@ -1401,7 +1501,7 @@ class App:
         i, _ = self.hit(px, py)
         if i is None:
             return
-        if not messagebox.askyesno("", "슬롯%d 를 지울까요?" % i):
+        if not messagebox.askyesno("", "%d번째 칸을 지울까요?" % (i + 1)):
             return
         self.slots.pop(i)
         self.texts.pop(i, None)
@@ -1409,11 +1509,11 @@ class App:
             self.texts[k - 1] = self.texts.pop(k)
         self.sync_slots()
         self.select(self.sel)
-        self.say("슬롯%d 삭제" % i)
+        self.say("%d번째 칸을 지웠습니다." % (i + 1))
         self.redraw()
 
     def reindex(self):
-        self.slotsel["values"] = ["슬롯%d" % i for i in range(len(self.slots))]
+        self._show_sel()
 
     def sync_slots(self, clear=False):
         """슬롯 개수가 바뀌면 남는 글과 선택 위치를 정리한다.
@@ -1430,9 +1530,9 @@ class App:
         self.sel = min(self.sel, n - 1) if n else 0
         self.reindex()
         if self.slots:
-            self.slotsel.current(self.sel)
+            self._show_sel()
         else:
-            self.slotsel.set("")
+            self._show_sel()
         return dropped
 
     # ------------------------------------------------------------ 도움말
@@ -1844,7 +1944,7 @@ class App:
         self.editor.delete("1.0", "end")
         self.editor.insert("1.0", self.texts[self.sel])
         self.redraw()
-        self.say("문항 %s 를 슬롯%d 에 넣었습니다." % (pr["no"] or s[0] + 1, self.sel))
+        self.say("문항 %s 를 %d번째 칸에 넣었습니다." % (pr["no"] or s[0] + 1, self.sel + 1))
 
     def autofill(self):
         if not getattr(self, "problems", None):
@@ -1859,7 +1959,7 @@ class App:
         self.editor.delete("1.0", "end")
         self.editor.insert("1.0", self.texts.get(self.sel, ""))
         self.redraw()
-        self.say("문항 %d개를 슬롯에 채웠습니다. 남은 문항 %d개."
+        self.say("문항 %d개를 칸에 채웠습니다. 남은 문항 %d개."
                  % (n, len(self.problems) - n))
 
     # ------------------------------------------------------------ 편집
@@ -1869,8 +1969,18 @@ class App:
             self.root.after_cancel(self._job)
         self._job = self.root.after(220, self.redraw)
 
+    def _show_sel(self):
+        """지금 고른 칸을 글로 알린다. 사람은 1번부터 센다."""
+        if not self.slots:
+            self.sellabel.config(text="칸이 없습니다")
+        elif 0 <= self.sel < len(self.slots):
+            self.sellabel.config(text="%d번째 칸  (%d개 중)"
+                                       % (self.sel + 1, len(self.slots)))
+        else:
+            self.sellabel.config(text="칸을 누르세요")
+
     def switch_slot(self, ev=None):
-        self.sel = self.slotsel.current()
+        pass
         self.editor.delete("1.0", "end")
         self.editor.insert("1.0", self.texts.get(self.sel, ""))
         self.redraw()
@@ -1890,7 +2000,7 @@ class App:
         self.editor.delete("1.0", "end")
         self.editor.insert("1.0", self.texts.get(self.sel, ""))
         self.redraw()
-        self.say("슬롯 %d개에 예시를 넣었습니다." % len(self.slots))
+        self.say("칸 %d개에 예시를 넣었습니다." % len(self.slots))
 
     def insert_image(self):
         """자료 그림을 커서 자리에 넣는다. 그래프나 실험 그림처럼 과학 문제에
@@ -2027,12 +2137,12 @@ class App:
                 size, iscale, over = self.fit_size(parts, w, h,
                                                    force_size=self.page_size())
                 if over:
-                    self.say("  슬롯%d 는 약 %d자 넘칩니다. 그만큼 줄이거나 칸을 키우세요."
-                             % (i, nch))
+                    self.say("  %d번째 칸은 약 %d자 넘칩니다. 그만큼 줄이거나 칸을 키우세요."
+                             % (i + 1, nch))
                 if iscale < 1.0:
-                    self.say("  슬롯%d 그림을 %d%%로 줄여 맞췄습니다." % (i, iscale * 100))
+                    self.say("  %d번째 칸 그림을 %d%%로 줄였습니다." % (i + 1, iscale * 100))
                 if size < self.bodysize.get():
-                    self.say("  슬롯%d 글자를 %.1fpt로 줄여 맞췄습니다." % (i, size))
+                    self.say("  %d번째 칸 글자를 %.1fpt로 줄였습니다." % (i + 1, size))
                 cp = table.get(self.picked_font(), False, size, "#1A1A1A")
                 inner = core.paras_from_parts(parts, char_pr=cp, width_hu=core.hu(w))
                 xml.append(core.rect_xml(x, y, w, h, fill=None, stroke=None, lw=0, z=z, inner=inner))
@@ -2092,10 +2202,9 @@ class App:
                 if size < self.bodysize.get():
                     bits.append("글자 %.1fpt" % size)
                 if bits:
-                    self.say("  슬롯%d 를 %s 로 맞췄습니다." % (i, ", ".join(bits)))
+                    self.say("  %d번째 칸을 %s 로 맞췄습니다." % (i + 1, ", ".join(bits)))
                 if over:
-                    self.say("  슬롯%d 는 더 줄여도 안 들어갑니다. 글을 줄이거나 칸을 키우세요." % i)
-            os.startfile(out)
+                    self.say("  %d번째 칸은 약 %d자 넘칩니다." % (i + 1, nch))
         except Exception:
             self.say(traceback.format_exc())
 
