@@ -312,6 +312,35 @@ def wipe(page, boxes):
                           graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED)
 
 
+def slot_bg(page, rect):
+    """칸 배경색. 그 안에서 가장 흔한 색을 고른다."""
+    try:
+        pix = page.get_pixmap(clip=rect, dpi=24, colorspace=fitz.csRGB, alpha=False)
+        s, n = pix.samples, pix.n
+        cnt = {}
+        for i in range(0, len(s) - n + 1, n):
+            k = (s[i], s[i + 1], s[i + 2])
+            cnt[k] = cnt.get(k, 0) + 1
+        best = max(cnt.items(), key=lambda kv: kv[1])[0]
+        return tuple(v / 255.0 for v in best)
+    except Exception:
+        return (1.0, 1.0, 1.0)
+
+
+def cover(page, rect, inset=1.2):
+    """칸 안을 배경색으로 덮는다.
+
+    redaction 은 칸에 완전히 덮인 벡터만 지운다. 칸을 살짝 넘나드는 그림은
+    남아서 새 글과 겹친다. 그렇다고 닿기만 해도 지우게 하면 칸 사이 구분선
+    까지 날아간다. 그래서 지우는 대신 칸 안쪽만 덮어 가린다. 테두리와
+    구분선은 칸 밖이라 산다."""
+    r = fitz.Rect(rect.x0 + inset, rect.y0 + inset,
+                  rect.x1 - inset, rect.y1 - inset)
+    if r.is_empty:
+        return
+    page.draw_rect(r, color=None, fill=slot_bg(page, rect), overlay=True)
+
+
 # 그림을 줄이면 그 안의 축 이름과 눈금 숫자도 같이 줄어든다. 그래프의 눈금값은
 # 장식이 아니라 문제를 푸는 데 읽어야 하는 정보다. Nature의 그림 지침은 그림
 # 안 글자를 5pt 밑으로 내리지 말라고 못박는다. 원본 자료의 글자가 9pt라면
@@ -385,6 +414,11 @@ def _one_page(src, pageno, slots, parts_of, out, ff, steps, lh, pad, wiped=False
     np_ = out.new_page(width=page.rect.width, height=page.rect.height)
     # 원본을 벡터 그대로 얹는다. 여기가 무손실인 지점이다
     np_.show_pdf_page(np_.rect, src, pageno)
+
+    # redaction 이 못 지운 칸 안 그림을 가린다. 원본을 얹은 뒤에 해야
+    # 새 문서 쪽에 덮인다
+    for rect in boxes.values():
+        cover(np_, rect)
 
     cv = PdfCanvas(np_)
     # 크기를 재 볼 곳. 같은 문서에 만들었다 지우면 페이지 참조가 무효가 된다

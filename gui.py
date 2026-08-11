@@ -483,21 +483,22 @@ class App:
         per = len(self.slots)
         start = self.pageno.get()                      # 1부터
         need = (len(self.problems) + per - 1) // per
-        last = min(start + need - 1, total)
-        pages = last - start + 1
-        if pages <= 0:
-            messagebox.showwarning("", "넣을 쪽이 없습니다.")
+        # 교재에는 표지와 목차와 Note 가 섞여 있다. 칸이 안 잡히는 쪽은
+        # 아래에서 저절로 걸러지지만, 목차는 칸 크기가 문제 칸과 같아서
+        # 가려낼 방법이 마땅치 않다. 끝 쪽은 사람이 정하는 편이 낫다
+        from tkinter import simpledialog
+        last = simpledialog.askinteger(
+            "어디까지 넣을까요",
+            "문항 %d개를 %d쪽부터 넣습니다.\n"
+            "지금 쪽 기준 한 쪽에 %d개씩이니 %d쪽쯤 필요합니다.\n\n"
+            "마지막 쪽 번호를 적으세요. (이 PDF는 %d쪽까지 있습니다)\n"
+            "표지나 목차가 섞여 있으면 문제 지면 끝 쪽을 적으면 됩니다."
+            % (len(self.problems), start, per, need, total),
+            initialvalue=min(start + need - 1, total),
+            minvalue=start, maxvalue=total, parent=self.root)
+        if not last:
             return
-        fit_n = pages * per
-        msg = ("%d쪽부터 %d쪽까지 %d쪽에 문항 %d개를 넣습니다.\n"
-               "한 쪽에 %d개씩입니다.\n\n"
-               "지금 칸 배치를 모든 쪽에 그대로 씁니다. 쪽마다 칸 모양이\n"
-               "다른 교재라면 쪽을 나눠 따로 하세요."
-               % (start, last, pages, min(len(self.problems), fit_n), per))
-        if fit_n < len(self.problems):
-            msg += "\n\n쪽이 모자라 문항 %d개는 빠집니다." % (len(self.problems) - fit_n)
-        if not messagebox.askyesno("여러 쪽 만들기", msg):
-            return
+        total = last          # 아래 루프가 여기까지만 돈다
 
         # 쪽마다 칸 모양이 다른 교재가 흔하다. 기본은 쪽마다 다시 찾는 것으로
         # 두고, 같은 판형이 반복되는 교재면 지금 배치를 그대로 쓰게 한다
@@ -507,20 +508,31 @@ class App:
             "예 - 쪽마다 그 쪽의 칸을 찾습니다. 쪽 구성이 다른 교재에 맞습니다.\n"
             "아니오 - 지금 칸 배치를 모든 쪽에 그대로 씁니다.")
 
-        jobs, taken = [], 0
-        for k in range(pages):
-            pno = start - 1 + k
+        jobs, taken, skipped = [], 0, []
+        pno = start - 1
+        while taken < len(self.problems) and pno < total:
             slots = self.slots
-            if redetect and k:
-                slots = self.slots_of_page(pno) or self.slots
+            if redetect and pno != start - 1:
+                slots = self.slots_of_page(pno)
+            if not slots:
+                # 표지, 목차, Note 처럼 문제 칸이 없는 쪽이다. 여기에 지금
+                # 쪽의 칸을 얹으면 원래 있던 글 위에 문제가 겹쳐 찍힌다
+                skipped.append(pno + 1)
+                pno += 1
+                continue
             chunk = self.problems[taken:taken + len(slots)]
-            if not chunk:
-                break
             taken += len(chunk)
             parts_of = {}
             for i, prob in enumerate(chunk):
                 parts_of[i] = parse_markup(ms.parts_to_markup(prob["parts"]))
             jobs.append((pno, slots, parts_of))
+            pno += 1
+        if not jobs:
+            messagebox.showwarning("", "문제 칸이 있는 쪽을 찾지 못했습니다.")
+            return
+        if skipped:
+            self.say("문제 칸이 없어 건너뛴 쪽: %s"
+                     % ", ".join(str(q) for q in skipped[:12]))
         out = os.path.join(OUTDIR, "교재.pdf")
         try:
             rep = pp.build_book(self.pdf_path.get(), jobs, out,
@@ -531,6 +543,10 @@ class App:
         info = pp.report(out)
         self.say("교재 %d쪽을 만들었습니다: %s (%.0f KB)"
                  % (len(jobs), out, info["bytes"] / 1024))
+        self.say("  문항 %d개를 넣었습니다." % taken)
+        if taken < len(self.problems):
+            self.say("  쪽이 모자라 문항 %d개가 남았습니다. 끝 쪽을 늘리거나"
+                     " 문제 지면이 더 있는 교재를 쓰세요." % (len(self.problems) - taken))
         for pno in sorted(rep):
             for i, size, iscale, over in rep[pno]:
                 if over:
