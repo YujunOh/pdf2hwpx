@@ -78,6 +78,7 @@ DEFAULT_KEYS = {
     "analyze": "<F5>",
     "build": "<Control-b>",
     "undo": "<Control-z>",
+    "redo": "<Control-y>",
     "buildpdf": "<Control-p>",
     "verify": "<F12>",
     "next_slot": "<Control-Return>",
@@ -92,12 +93,40 @@ DEFAULT_KEYS = {
 KEY_HELP = {
     "save": "작업 저장", "open": "작업 열기", "manuscript": "원고 불러오기",
     "analyze": "레이아웃 분석", "build": "HWPX 만들기", "verify": "한글로 확인",
-    "undo": "되돌리기",
+    "undo": "되돌리기", "redo": "다시 실행",
     "buildpdf": "인쇄용 PDF",
     "next_slot": "다음 칸", "prev_slot": "이전 칸",
     "circled": "원문자 순환 (3 누르고 눌러 ③)", "equation": "수식 넣기",
     "zoom": "확대 토글", "toggle_log": "로그 접기", "help": "도움말",
 }
+
+
+def pretty_key(seq):
+    """<Control-p> 를 Ctrl+P 처럼 사람이 읽는 꼴로."""
+    t = (seq or "").strip("<>")
+    t = (t.replace("Control-", "Ctrl+").replace("Alt-", "Alt+")
+          .replace("Shift-", "Shift+").replace("Return", "Enter"))
+    if len(t) == 1:
+        t = t.upper()
+    return t or "(없음)"
+
+
+def key_of(ev):
+    """키 이벤트를 Tk 바인딩 문자열로. Ctrl+Shift+E 는 <Control-Shift-E>."""
+    name = ev.keysym
+    if name in ("Control_L", "Control_R", "Shift_L", "Shift_R",
+                "Alt_L", "Alt_R", "Win_L", "Win_R", "??"):
+        return ""
+    mods = []
+    if ev.state & 0x4:
+        mods.append("Control")
+    if ev.state & 0x20000 or ev.state & 0x8:
+        mods.append("Alt")
+    if ev.state & 0x1:
+        mods.append("Shift")
+    if len(name) == 1 and name.isalpha():
+        name = name.lower() if not mods else name.upper()
+    return "<%s>" % "-".join(mods + [name])
 
 
 def load_keys():
@@ -297,6 +326,8 @@ class App:
         self._resize_job = None
         self.zoom = None       # None 이면 지면 전체를 맞춘다
         self._undo = []
+        self._redo = []
+        self.numstyle = None
         self._guides = []
         self.next_prob = 0     # 원고에서 다음에 넣을 문항
         # 쪽마다 칸과 글을 따로 담는다. 예전에는 한 벌만 들고 있어서 1쪽을
@@ -419,6 +450,9 @@ class App:
         self.undobtn = ttk.Button(top, text="↩ 되돌리기", state="disabled",
                                   command=self.undo)
         self.undobtn.pack(side="left", padx=(10, 0))
+        self.redobtn = ttk.Button(top, text="↪ 다시", state="disabled",
+                                  command=self.redo)
+        self.redobtn.pack(side="left", padx=(4, 0))
 
         ttk.Label(top, text="  쪽").pack(side="left", padx=(14, 0))
         ttk.Button(top, text="◀", width=3, command=lambda: self.step_page(-1)).pack(side="left")
@@ -566,7 +600,7 @@ class App:
                    command=lambda: self.bump_img(5)).pack(side="left")
         ttk.Button(self.imgrow, text="원고 크기", style="Small.TButton",
                    command=self.reset_img).pack(side="left", padx=6)
-        ttk.Label(self.imgrow, text="글 안의 |숫자 를 고쳐도 됩니다",
+        ttk.Label(self.imgrow, text="아래 글의  [[img: … | 46 ]]  에서 46 을 고쳐도 됩니다",
                   foreground="#8892a6").pack(side="left", padx=6)
 
         self.pal = pal = ttk.Frame(sf)
@@ -1087,9 +1121,40 @@ class App:
                                       % (len(self.slots), " · 채움 %d" % n if n else ""))
             self.show_title()
             self.draw_rail()
+            num = self.measure_number()
+            if num:
+                self.numstyle = num
+                self.say("문제 번호는 %.1fpt %s 입니다. 칸이 모자라면 이 모양으로 그립니다."
+                         % (num["size"], num["color"]))
             self.redraw()
         except Exception:
             self.say(traceback.format_exc())
+
+    def measure_number(self):
+        """디자인에 박힌 문제 번호의 크기와 색을 잰다.
+
+        칸이 원고 문항보다 적으면 번호를 우리가 그려야 한다. 그때 디자인과
+        같은 모양으로 그리려면 먼저 재 둬야 한다. 폰트 이름은 이 PDF가
+        PDFium 을 거쳐 Type3 로 들어와서 읽을 수 없다."""
+        import re as _re
+        cand = []
+        for t in self.shapes:
+            if t["k"] != "text" or t["size"] < 13:
+                continue
+            v = t["s"].strip()
+            if _re.fullmatch(r"0?\d{1,2}", v):
+                cand.append(t)
+        if not cand:
+            return None
+        cand.sort(key=lambda t: (t["y"], t["x"]))
+        base = cand[0]
+        return {"size": round(base["size"], 1),
+                "color": base.get("color") or "#000000",
+                "count": len(cand),
+                "dx": round(base["x"] - min(x for x, y, w, h in self.slots), 1)
+                      if self.slots else 0.0,
+                "dy": round(base["y"] - min(y for x, y, w, h in self.slots), 1)
+                      if self.slots else 0.0}
 
     def measure_body(self):
         """칸 안에 있던 원본 글자에서 크기와 행간을 잰다.
@@ -1251,17 +1316,15 @@ class App:
         ml = min(x for x, y, w, h in boxes)
         if ml <= 0 or ml > W / 3:
             return boxes
-        cols = sorted({round(x) for x, y, w, h in boxes})
-        if len(cols) == 2:
-            left_end = max(x + w for x, y, w, h in boxes if round(x) == cols[0])
-            gap = max(cols[1] - left_end, 12)
-            cw = (W - ml * 2 - gap) / 2.0
-            if cw < 40:
-                return boxes
-            nx = {cols[0]: ml, cols[1]: ml + cw + gap}
-            return [(nx[round(x)], y, cw, h) for x, y, w, h in boxes]
-        return [(x, y, min(w, W - ml - x), h) for x, y, w, h in boxes
+        # 시작점은 절대 옮기지 않는다. 문제 번호는 디자인에 박혀 있어서
+        # 칸을 옮기면 번호와 본문 왼쪽 끝이 어긋난다. 폭만 줄인다
+        room = [(x, y, min(w, W - ml - x), h) for x, y, w, h in boxes
                 if W - ml - x > 40]
+        if not room:
+            return boxes
+        # 좌우 칸 폭이 다르면 지면이 기울어 보인다. 좁은 쪽에 맞춘다
+        cw = min(w for x, y, w, h in room)
+        return [(x, y, cw, h) for x, y, w, h in room]
 
     def shape_box(self, s):
         if s["k"] == "curve":
@@ -1396,6 +1459,7 @@ class App:
         일에는 되돌릴 길이 있어야 한다."""
         import copy
         self._undo.append((what, copy.deepcopy(self.pages), self.next_prob))
+        self._redo.clear()
         if len(self._undo) > 15:
             self._undo.pop(0)
 
@@ -1403,7 +1467,9 @@ class App:
         if not self._undo:
             self.say("되돌릴 것이 없습니다.")
             return "break"
+        import copy
         what, snap, np_ = self._undo.pop()
+        self._redo.append((what, copy.deepcopy(self.pages), self.next_prob))
         self.pages = snap
         self.next_prob = np_
         self._psize_key = None
@@ -1414,6 +1480,26 @@ class App:
         self.show_progress()
         self.refresh_side()
         self.say("되돌렸습니다: %s" % what)
+        return "break"
+
+    def redo(self, ev=None):
+        """되돌린 것을 다시 실행한다."""
+        if not self._redo:
+            self.say("다시 실행할 것이 없습니다.")
+            return "break"
+        import copy
+        what, snap, np_ = self._redo.pop()
+        self._undo.append((what, copy.deepcopy(self.pages), self.next_prob))
+        self.pages = snap
+        self.next_prob = np_
+        self._psize_key = None
+        self.editor.delete("1.0", "end")
+        self.editor.insert("1.0", self.texts.get(self.sel, ""))
+        self.redraw()
+        self.draw_rail()
+        self.show_progress()
+        self.refresh_side()
+        self.say("다시 했습니다: %s" % what)
         return "break"
 
     def show_progress(self):
@@ -1824,10 +1910,10 @@ class App:
         for kind, q in (self._guides or []):
             if kind == "v":
                 cv.create_line(X(q), Y(0), X(q), Y(self.page_h),
-                               fill="#e0409a", width=1, dash=(4, 3))
+                               fill="#ff2d95", width=2, dash=(6, 3))
             else:
                 cv.create_line(X(0), Y(q), X(self.page_w), Y(q),
-                               fill="#e0409a", width=1, dash=(4, 3))
+                               fill="#ff2d95", width=2, dash=(6, 3))
 
         if self._rubber:
             rx, ry, rw, rh = self._rubber
@@ -1957,7 +2043,7 @@ class App:
 
     def on_hover(self, ev):
         """모서리에 오면 커서를 바꿔 크기 조절이 되는 곳임을 알린다."""
-        if getattr(self, "_drag", None):
+        if getattr(self, "_drag", None) or not hasattr(self, "origin"):
             return
         px, py = self.to_pt(ev.x, ev.y)
         i, mode = self.hit(px, py)
@@ -2024,6 +2110,71 @@ class App:
     def key_help(self, ev=None):
         self.show_help(); return "break"
 
+    def rebind(self, name):
+        """단축키를 새로 받는다. 누른 키를 그대로 쓴다."""
+        w = tk.Toplevel(self._help or self.root)
+        w.title("새 단축키")
+        w.transient(self._help or self.root)
+        w.grab_set()
+        ttk.Label(w, text="%s\n\n쓸 키를 누르세요. Esc 를 누르면 그만둡니다."
+                          % KEY_HELP.get(name, name),
+                  padding=24, justify="center").pack()
+
+        def got(ev):
+            if ev.keysym == "Escape":
+                w.destroy()
+                return "break"
+            seq = key_of(ev)
+            if not seq:
+                return "break"
+            taken = [n for n, q in self.keys.items() if q == seq and n != name]
+            if taken:
+                messagebox.showwarning("", "%s 는 이미 %s 에 쓰고 있습니다."
+                                           % (pretty_key(seq),
+                                              KEY_HELP.get(taken[0], taken[0])),
+                                       parent=w)
+                return "break"
+            old = self.keys.get(name, "")
+            self.keys[name] = seq
+            if old:
+                try:
+                    self.root.unbind_all(old)
+                except Exception:
+                    pass
+            self.bind_keys()
+            self.save_keys()
+            if name in getattr(self, "_keyrows", {}):
+                self._keyrows[name].config(text=pretty_key(seq))
+            self.say("단축키를 바꿨습니다: %s -> %s"
+                     % (KEY_HELP.get(name, name), pretty_key(seq)))
+            w.destroy()
+            return "break"
+
+        w.bind("<Key>", got)
+        w.focus_force()
+
+    def save_keys(self):
+        try:
+            json.dump(self.keys, open(self.keys_path, "w", encoding="utf-8"),
+                      ensure_ascii=False, indent=2)
+        except Exception:
+            self.say("단축키를 저장하지 못했습니다: %s" % self.keys_path)
+
+    def reset_keys(self):
+        if not messagebox.askyesno("", "단축키를 처음 설정으로 되돌릴까요?"):
+            return
+        for seq in list(self.keys.values()):
+            try:
+                self.root.unbind_all(seq)
+            except Exception:
+                pass
+        self.keys = dict(DEFAULT_KEYS)
+        self.bind_keys()
+        self.save_keys()
+        for n, lab in getattr(self, "_keyrows", {}).items():
+            lab.config(text=pretty_key(self.keys.get(n, "")))
+        self.say("단축키를 처음 설정으로 되돌렸습니다.")
+
     def show_help(self):
         if getattr(self, "_help", None) and self._help.winfo_exists():
             self._help.lift(); self._help.focus_force(); return
@@ -2057,26 +2208,33 @@ class App:
         # --- 단축키
         f1, k = sheet(nb)
         nb.add(f1, text="단축키")
-        ttk.Label(k, text="한글에서 쓰던 키를 그대로 가져왔습니다.",
-                  font=("맑은 고딕", 10, "bold")).grid(row=0, column=0, columnspan=2,
+        ttk.Label(k, text="한글에서 쓰던 키를 그대로 가져왔습니다. 바꾸기를 누르고 새 키를 누르세요.",
+                  font=("맑은 고딕", 11, "bold")).grid(row=0, column=0, columnspan=3,
                                                      sticky="w", padx=12, pady=(10, 8))
+        self._keyrows = {}
         r = 1
-        for name, seq in self.keys.items():
-            pretty = (seq.strip("<>").replace("Control-", "Ctrl+").replace("Alt-", "Alt+")
-                      .replace("Shift-", "Shift+").replace("Return", "Enter"))
-            if len(pretty) == 1:
-                pretty = pretty.upper()
-            ttk.Label(k, text=pretty, font=("Consolas", 10),
-                      foreground="#1a4f8a").grid(row=r, column=0, sticky="w", padx=(18, 16), pady=3)
-            ttk.Label(k, text=KEY_HELP.get(name, name)).grid(row=r, column=1, sticky="w", pady=3)
+        for name in sorted(self.keys, key=lambda n: KEY_HELP.get(n, n)):
+            lab = ttk.Label(k, text=pretty_key(self.keys[name]), font=("Consolas", 11),
+                            foreground="#1a4f8a", width=16)
+            lab.grid(row=r, column=0, sticky="w", padx=(18, 10), pady=3)
+            ttk.Label(k, text=KEY_HELP.get(name, name)).grid(row=r, column=1,
+                                                             sticky="w", pady=3)
+            ttk.Button(k, text="바꾸기", style="Small.TButton",
+                       command=lambda n=name: self.rebind(n)).grid(row=r, column=2,
+                                                                   sticky="w", padx=8)
+            self._keyrows[name] = lab
             r += 1
-        ttk.Label(k, text="이 파일을 고치면 키가 바뀝니다.",
-                  foreground="#666666").grid(row=r, column=0, columnspan=2,
-                                             sticky="w", padx=12, pady=(14, 2))
+        ttk.Button(k, text="처음 설정으로 되돌리기",
+                   command=self.reset_keys).grid(row=r, column=0, columnspan=2,
+                                                 sticky="w", padx=18, pady=(14, 4))
+        r += 1
+        ttk.Label(k, text="이 파일에 저장됩니다. 직접 고쳐도 됩니다.",
+                  foreground="#666666").grid(row=r, column=0, columnspan=3,
+                                             sticky="w", padx=12, pady=(10, 2))
         e = ttk.Entry(k, width=74)
         e.insert(0, self.keys_path)
         e.configure(state="readonly")
-        e.grid(row=r + 1, column=0, columnspan=2, sticky="w", padx=18, pady=(0, 14))
+        e.grid(row=r + 1, column=0, columnspan=3, sticky="w", padx=18, pady=(0, 14))
 
         # --- 쓰는 순서
         f2, u = sheet(nb)
@@ -2180,6 +2338,9 @@ class App:
 
     def key_undo(self, ev=None):
         return self.undo()
+
+    def key_redo(self, ev=None):
+        return self.redo()
 
     def key_buildpdf(self, ev=None):
         self.build_pdf()
@@ -2476,6 +2637,7 @@ class App:
         try:
             self.show_imgrow()
             self.undobtn.config(state="normal" if self._undo else "disabled")
+            self.redobtn.config(state="normal" if self._redo else "disabled")
         except Exception:
             pass
 

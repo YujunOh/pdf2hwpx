@@ -20,6 +20,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
+HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
 
 EQ_MARK = ""
 IMG_MARK = ""
@@ -69,7 +70,17 @@ def _para_bits(p, imgs):
                             wpt = float(sz.get("width", 0)) / 100.0
                         except Exception:
                             wpt = 0.0
-                    pics.append((ref, wpt))
+                    # 글자처럼 취급하지 않는 그림은 본문 옆에 붙는다.
+                    # 원고가 정한 쪽을 그대로 따른다
+                    side = ""
+                    pos = el.find(HP + "pos")
+                    if pos is not None and pos.get("treatAsChar") == "0":
+                        al = (pos.get("horzAlign") or "").upper()
+                        if al == "RIGHT":
+                            side = "r"
+                        elif al == "LEFT":
+                            side = "l"
+                    pics.append((ref, wpt, side))
                     text.append(IMG_MARK)
     return "".join(text), eqs, pics
 
@@ -140,13 +151,20 @@ def _restore(text, eqs, pics, imgs):
         elif ch == IMG_MARK:
             item = pics[pi] if pi < len(pics) else None
             pi += 1
-            ref, wpt = item if isinstance(item, tuple) else (item, 0.0)
+            if isinstance(item, tuple):
+                ref, wpt, side = (tuple(item) + ("",))[:3]
+            else:
+                ref, wpt, side = item, 0.0, ""
             path = imgs.get(ref)
             if path:
                 # 원고 판면을 A4에서 좌우 여백을 뺀 450pt로 보고 비율을 낸다.
                 # 크기를 안 적어 주면 칸 폭에 맞춰 늘어나 원고보다 커진다
                 pct = int(round(min(max(wpt / 450.0 * 100.0, 12), 99))) if wpt else 0
-                out.append("\n[[img:%s%s]]\n" % (path, "|%d" % pct if pct else ""))
+                tail = "|%d" % pct if pct else ""
+                if side:
+                    # 원고가 본문 옆에 붙여 둔 그림이다. 그 쪽을 그대로 따른다
+                    tail = (tail or "|40") + "|" + side
+                out.append("\n[[img:%s%s]]\n" % (path, tail))
         else:
             out.append(ch)
     return "".join(out)
@@ -184,6 +202,39 @@ def extract_images(path, outdir):
             continue
     z.close()
     return got
+
+
+def body_font(path):
+    """원고가 쓰는 본문 글꼴과 크기. 가장 많이 쓰인 글자 모양을 고른다.
+
+    강사가 원고에서 쓴 글꼴이 있는데 우리가 임의로 정할 이유가 없다."""
+    try:
+        z = zipfile.ZipFile(path)
+        head = ET.fromstring(z.read("Contents/header.xml"))
+        faces = {}
+        for fa in head.iter(HH + "fontface"):
+            for fo in fa.iter(HH + "font"):
+                faces[fo.get("id")] = fo.get("face")
+        cps = {}
+        for c in head.iter(HH + "charPr"):
+            fr = c.find(HH + "fontRef")
+            cps[c.get("id")] = (c.get("height"),
+                                faces.get(fr.get("hangul")) if fr is not None else None)
+        use = {}
+        for name in _sections(z):
+            root = ET.fromstring(z.read(name))
+            for r in root.iter(HP + "run"):
+                if r.find(HP + "t") is not None:
+                    k = r.get("charPrIDRef")
+                    use[k] = use.get(k, 0) + 1
+        z.close()
+        if not use:
+            return None
+        best = max(use.items(), key=lambda kv: kv[1])[0]
+        hgt, face = cps.get(best, (None, None))
+        return (face, float(hgt) / 100.0 if hgt else 0.0)
+    except Exception:
+        return None
 
 
 def load(path, imgdir=""):
