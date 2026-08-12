@@ -77,6 +77,7 @@ DEFAULT_KEYS = {
     "manuscript": "<Control-Shift-O>",
     "analyze": "<F5>",
     "build": "<Control-b>",
+    "undo": "<Control-z>",
     "buildpdf": "<Control-p>",
     "verify": "<F12>",
     "next_slot": "<Control-Return>",
@@ -91,6 +92,7 @@ DEFAULT_KEYS = {
 KEY_HELP = {
     "save": "작업 저장", "open": "작업 열기", "manuscript": "원고 불러오기",
     "analyze": "레이아웃 분석", "build": "HWPX 만들기", "verify": "한글로 확인",
+    "undo": "되돌리기",
     "buildpdf": "인쇄용 PDF",
     "next_slot": "다음 칸", "prev_slot": "이전 칸",
     "circled": "원문자 순환 (3 누르고 눌러 ③)", "equation": "수식 넣기",
@@ -294,6 +296,9 @@ class App:
         self._psize_key = None
         self._resize_job = None
         self.zoom = None       # None 이면 지면 전체를 맞춘다
+        self._undo = []
+        self._guides = []
+        self.next_prob = 0     # 원고에서 다음에 넣을 문항
         # 쪽마다 칸과 글을 따로 담는다. 예전에는 한 벌만 들고 있어서 1쪽을
         # 채우고 2쪽으로 넘어가면 1쪽에 친 글이 그대로 날아갔다. 교재는
         # 한 권이 작업 단위인데 도구가 한 쪽만 기억하고 있었다
@@ -392,6 +397,8 @@ class App:
         ttk.Button(top, text="▶", width=3, command=lambda: self.step_page(1)).pack(side="left")
         self.pagenote = ttk.Label(top, text="", foreground="#6b7689")
         self.pagenote.pack(side="left", padx=8)
+        self.progtext = ttk.Label(top, text="", foreground="#1a6b3a")
+        self.progtext.pack(side="left", padx=(4, 0))
 
         self.title = ttk.Label(top, text="", foreground="#55617a")
         self.title.pack(side="right")
@@ -445,6 +452,7 @@ class App:
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
         self.canvas.bind("<Button-3>", self.on_rclick)
+        self.canvas.bind("<Motion>", self.on_hover)
         self.canvas.bind("<Configure>", self.on_resize)
         self.root.after(120, self.redraw)      # 첫 화면 안내
         bar = ttk.Frame(lf)
@@ -533,6 +541,7 @@ class App:
         self.editor = tk.Text(sf, wrap="word", font=("맑은 고딕", 11), undo=True, height=10)
         self.editor.pack(fill="both", expand=True)
         self.editor.bind("<KeyRelease>", self.on_type)
+        self.editor.configure(undo=True)
 
         act = ttk.Frame(rf)
         act.pack(fill="x")
@@ -1009,7 +1018,7 @@ class App:
             # 것을 다시 분석했다고 날리면 안 된다
             keep = bool(self.slots)
             if not keep:
-                self.slots = self.detect_slots()
+                self.slots = self.balance(self.detect_slots())
             dropped = self.sync_slots()
             if dropped:
                 self.say("  칸이 줄어 넘치는 글 %d개를 버렸습니다." % dropped)
@@ -1018,7 +1027,7 @@ class App:
 
             self.info.config(text=(
                 "%.0f x %.0f mm   사각형 %d · 직선 %d · 원본텍스트 %d\n"
-                "이미지 0개 (래스터화 없음)   찾은 문제 칸 %d개"
+                "그림으로 굽지 않아 인쇄 화질 그대로   찾은 문제 칸 %d개"
                 % (self.page_w * 25.4 / 72, self.page_h * 25.4 / 72, n_r, n_l, n_t, len(self.slots))))
             m = self.measure_body()
             if m:
@@ -1187,6 +1196,31 @@ class App:
         self._slot_mode = name
         return picked
 
+    def balance(self, boxes):
+        """검출한 칸을 종이 여백 안에 넣고 좌우 폭을 맞춘다.
+
+        검출은 글자 덩어리를 기준으로 삼아서 칸이 종이 밖으로 나가거나
+        가운데 구분선을 넘는다. 실측해 보니 오른쪽 칸이 종이를 4pt 넘고
+        왼쪽 여백은 45pt 인데 오른쪽은 음수였다. 왼쪽 여백을 기준으로
+        오른쪽도 같게 잡고, 두 단이면 두 칸 폭을 같게 만든다."""
+        if not boxes:
+            return boxes
+        W = self.page_w
+        ml = min(x for x, y, w, h in boxes)
+        if ml <= 0 or ml > W / 3:
+            return boxes
+        cols = sorted({round(x) for x, y, w, h in boxes})
+        if len(cols) == 2:
+            left_end = max(x + w for x, y, w, h in boxes if round(x) == cols[0])
+            gap = max(cols[1] - left_end, 12)
+            cw = (W - ml * 2 - gap) / 2.0
+            if cw < 40:
+                return boxes
+            nx = {cols[0]: ml, cols[1]: ml + cw + gap}
+            return [(nx[round(x)], y, cw, h) for x, y, w, h in boxes]
+        return [(x, y, min(w, W - ml - x), h) for x, y, w, h in boxes
+                if W - ml - x > 40]
+
     def shape_box(self, s):
         if s["k"] == "curve":
             xs = [q[0] for q in s["pts"]]; ys = [q[1] for q in s["pts"]]
@@ -1247,6 +1281,38 @@ class App:
         self.redraw()
         self.draw_rail()
         self.say("이 쪽 칸을 모두 지웠습니다. 빈 곳을 끌어 새로 그릴 수 있습니다.")
+
+    def snapshot(self, what):
+        """되돌리기용으로 지금 상태를 담아 둔다. 한 번에 여러 칸이 바뀌는
+        일에는 되돌릴 길이 있어야 한다."""
+        import copy
+        self._undo.append((what, copy.deepcopy(self.pages), self.next_prob))
+        if len(self._undo) > 15:
+            self._undo.pop(0)
+
+    def undo(self, ev=None):
+        if not self._undo:
+            self.say("되돌릴 것이 없습니다.")
+            return "break"
+        what, snap, np_ = self._undo.pop()
+        self.pages = snap
+        self.next_prob = np_
+        self._psize_key = None
+        self.editor.delete("1.0", "end")
+        self.editor.insert("1.0", self.texts.get(self.sel, ""))
+        self.redraw()
+        self.draw_rail()
+        self.show_progress()
+        self.say("되돌렸습니다: %s" % what)
+        return "break"
+
+    def show_progress(self):
+        """원고를 어디까지 썼는지 늘 보이게 한다."""
+        if not getattr(self, "problems", None):
+            self.progtext.config(text="")
+            return
+        self.progtext.config(text="원고 %d / %d 사용"
+                                  % (self.next_prob, len(self.problems)))
 
     def bump_zoom(self, d):
         """미리보기 배율. 지면 전체를 한 화면에 넣으면 본문이 작을 수밖에
@@ -1374,6 +1440,8 @@ class App:
             # 크기만 다른 상황이면 있는 것을 늘려 쓴다. 다시 굽는 것보다
             # 스무 배 싸고, 손을 떼면 곧바로 제 화질로 다시 그린다
             w0, h0 = self._bg_img.size
+            if w0 == px_w:
+                return self._bg_img
             if w0 > 0:
                 return self._bg_img.resize(
                     (max(px_w, 1), max(int(px_w * h0 / w0), 1)), Image.BILINEAR)
@@ -1424,42 +1492,43 @@ class App:
         cx = cw / 2
         y = max(ch / 2 - 170, 24)
         cv.create_text(cx, y, text="디자인이 끝난 교재 PDF를 여세요",
-                       font=("맑은 고딕", -22, "bold"), fill="#2b3a55")
+                       font=("맑은 고딕", -30, "bold"), fill="#22314c")
         y += 46
 
         # 눌러야 할 것을 먼저 놓는다. 설명은 그 아래에 접어 둔다
-        cv.create_rectangle(cx - 96, y, cx + 96, y + 42,
+        cv.create_rectangle(cx - 130, y, cx + 130, y + 56,
                             fill="#2f6fd0", outline="", tags="pickbtn")
-        cv.create_text(cx, y + 21, text="교재 PDF 고르기", fill="#ffffff",
-                       font=("맑은 고딕", -14, "bold"), tags="pickbtn")
+        cv.create_text(cx, y + 28, text="교재 PDF 고르기", fill="#ffffff",
+                       font=("맑은 고딕", -18, "bold"), tags="pickbtn")
         cv.tag_bind("pickbtn", "<Button-1>", lambda e: self.pick())
-        y += 54
+        y += 70
 
         if os.path.exists(sample_pdf()):
-            cv.create_rectangle(cx - 96, y, cx + 96, y + 36,
-                                fill="", outline="#8fb0e0", tags="demobtn")
-            cv.create_text(cx, y + 18, text="예제로 해보기", fill="#2f6fd0",
-                           font=("맑은 고딕", -13), tags="demobtn")
+            cv.create_rectangle(cx - 130, y, cx + 130, y + 48,
+                                fill="#ffffff", outline="#8fb0e0", width=2,
+                                tags="demobtn")
+            cv.create_text(cx, y + 24, text="예제로 해보기", fill="#2f6fd0",
+                           font=("맑은 고딕", -16), tags="demobtn")
             cv.tag_bind("demobtn", "<Button-1>", lambda e: self.open_sample())
-            y += 48
+            y += 62
 
         if self.recent:
             y += 8
-            cv.create_text(cx, y, text="최근에 연 파일", font=("맑은 고딕", -11),
-                           fill="#8892a6")
+            cv.create_text(cx, y, text="최근에 연 파일", font=("맑은 고딕", -13),
+                           fill="#6b7689")
             for i, q in enumerate(self.recent[:3]):
                 y += 26
                 cv.create_text(cx, y, text=os.path.basename(q),
-                               font=("맑은 고딕", -12, "underline"), fill="#2f6fd0",
+                               font=("맑은 고딕", -14, "underline"), fill="#2f6fd0",
                                tags="recent%d" % i)
-                cv.create_text(cx, y + 13, text=os.path.dirname(q)[-52:],
-                               font=("맑은 고딕", -9), fill="#a3abbb")
+                cv.create_text(cx, y + 15, text=os.path.dirname(q)[-52:],
+                               font=("맑은 고딕", -11), fill="#98a1b3")
                 cv.tag_bind("recent%d" % i, "<Button-1>",
                             lambda e, w=q: (self.pdf_path.set(w), self.analyze()))
                 y += 14
 
         y += 34
-        cv.create_text(cx, y, text="쓰는 순서", font=("맑은 고딕", -11), fill="#8892a6")
+        cv.create_text(cx, y, text="쓰는 순서", font=("맑은 고딕", -13), fill="#6b7689")
         y += 22
         for line in (
             "1.  PDF를 열면 문제 칸을 스스로 찾습니다. 잘못 잡히면 손으로 그리면 됩니다.",
@@ -1467,9 +1536,9 @@ class App:
             "3.  그래프나 그림은 그림 넣기 로 넣습니다. 아래 글이 알아서 밀립니다.",
             "4.  Ctrl+P 를 누르면 인쇄용 PDF가 나오고 바로 열립니다.",
         ):
-            cv.create_text(cx - 240, y, text=line, anchor="w",
-                           font=("맑은 고딕", -12), fill="#6b7689")
-            y += 24
+            cv.create_text(cx - 250, y, text=line, anchor="w",
+                           font=("맑은 고딕", -14), fill="#4a5568")
+            y += 28
         self.status.config(text="PDF를 고르면 시작합니다")
 
     def open_sample(self):
@@ -1507,7 +1576,7 @@ class App:
         cv.delete("all")
         cw = max(cv.winfo_width(), 200)
         ch = max(cv.winfo_height(), 200)
-        m = 12
+        m = 18
 
         zoom = self.zoomsel.get() and self.slots and self.sel < len(self.slots)
         if zoom:
@@ -1604,9 +1673,18 @@ class App:
                     cv.create_text(lx + bw / 2, ly + bh / 2, text="%d" % i,
                                    fill="#ffffff", font=("맑은 고딕", -fs, "bold"))
             txt = self.texts.get(i, "").strip()
+            if txt and quick and i != self.sel:
+                # 칸을 끄는 동안은 다른 칸 글을 다시 조판하지 않는다. 매번
+                # 줄을 새로 짜느라 드래그가 초당 다섯 번밖에 안 그려졌다.
+                # 손을 떼면 제대로 그린다
+                cv.create_rectangle(X(x) + 4, Y(y) + 4, X(x + w) - 4, Y(y + h) - 4,
+                                    fill="#eef1f6", outline="")
+                cv.create_text(X(x) + 8, Y(y) + 8, anchor="nw", text="글 있음",
+                               font=("맑은 고딕", -max(int(8 * sc), 8)), fill="#9aa3b2")
+                txt = ""
             if txt:
                 parts = parse_markup(txt)
-                psz = self.page_size()
+                psz = self.page_size(quick=quick)
                 px = max(int(psz * sc), 6)
                 _, iscale, _ = self.fit_size(parts, w, h, force_size=psz)
                 end = pv.render_parts(cv, parts, X(x) + 4,
@@ -1632,6 +1710,14 @@ class App:
             cv.create_rectangle(a, b, c2, d2, fill="#e9e9ee", outline="")
         cv.create_rectangle(X(0), Y(0), X(self.page_w), Y(self.page_h),
                             outline="#b9b9c4")
+
+        for kind, q in (self._guides or []):
+            if kind == "v":
+                cv.create_line(X(q), Y(0), X(q), Y(self.page_h),
+                               fill="#e0409a", width=1, dash=(4, 3))
+            else:
+                cv.create_line(X(0), Y(q), X(self.page_w), Y(q),
+                               fill="#e0409a", width=1, dash=(4, 3))
 
         if self._rubber:
             rx, ry, rw, rh = self._rubber
@@ -1683,25 +1769,95 @@ class App:
                           "fz": (self.origin[0], self.origin[1], self.scale)}
         self.redraw()
 
+    def snap_lines(self):
+        """다른 칸과 종이 여백에서 끌어올 기준선. (세로선들, 가로선들)"""
+        vs, hs = set(), set()
+        for i, (x, y, w, h) in enumerate(self.slots):
+            if i == self.sel:
+                continue
+            vs.update((x, x + w, x + w / 2.0))
+            hs.update((y, y + h, y + h / 2.0))
+        if self.slots:
+            ml = min(x for x, y, w, h in self.slots)
+            vs.update((ml, self.page_w - ml, self.page_w / 2.0))
+        return sorted(vs), sorted(hs)
+
+    def snap(self, v, lines, tol):
+        """가까운 기준선에 붙인다. 붙었으면 (값, 그 선)."""
+        best, bd = v, tol
+        for q in lines:
+            d = abs(q - v)
+            if d < bd:
+                best, bd = q, d
+        return best, (best if bd < tol else None)
+
     def on_drag(self, ev):
         d = getattr(self, "_drag", None)
         if not d:
             return
         px, py = self.to_pt(ev.x, ev.y, d.get("fz"))
+        vs, hs = self.snap_lines()
+        tol = 6.0 / max(self.scale, 0.01)      # 화면에서 6픽셀쯤
+        self._guides = []
         if d["mode"] == "new":
-            self._rubber = (min(d["sx"], px), min(d["sy"], py),
-                            abs(px - d["sx"]), abs(py - d["sy"]))
+            x0, y0 = min(d["sx"], px), min(d["sy"], py)
+            x1, y1 = max(d["sx"], px), max(d["sy"], py)
+            x1, g = self.snap(x1, vs, tol)
+            if g is not None:
+                self._guides.append(("v", g))
+            y1, g = self.snap(y1, hs, tol)
+            if g is not None:
+                self._guides.append(("h", g))
+            self._rubber = (x0, y0, x1 - x0, y1 - y0)
         elif d["mode"] == "move":
             x, y, w, h = d["orig"]
-            self.slots[self.sel] = (x + px - d["sx"], y + py - d["sy"], w, h)
+            nx, ny = x + px - d["sx"], y + py - d["sy"]
+            # 왼쪽 끝과 오른쪽 끝 둘 다 붙여 본다. 가까운 쪽이 이긴다
+            lx, gl = self.snap(nx, vs, tol)
+            rx, gr = self.snap(nx + w, vs, tol)
+            if gl is not None and (gr is None or abs(lx - nx) <= abs(rx - (nx + w))):
+                nx = lx
+                self._guides.append(("v", gl))
+            elif gr is not None:
+                nx = rx - w
+                self._guides.append(("v", gr))
+            ty, gt = self.snap(ny, hs, tol)
+            by, gb = self.snap(ny + h, hs, tol)
+            if gt is not None and (gb is None or abs(ty - ny) <= abs(by - (ny + h))):
+                ny = ty
+                self._guides.append(("h", gt))
+            elif gb is not None:
+                ny = by - h
+                self._guides.append(("h", gb))
+            self.slots[self.sel] = (nx, ny, w, h)
         elif d["mode"] == "resize":
             x, y, w, h = d["orig"]
-            self.slots[self.sel] = (x, y, max(w + px - d["sx"], 30), max(h + py - d["sy"], 24))
-        self.redraw()
+            nw = max(w + px - d["sx"], 30)
+            nh = max(h + py - d["sy"], 24)
+            rx, g = self.snap(x + nw, vs, tol)
+            if g is not None:
+                nw = max(rx - x, 30)
+                self._guides.append(("v", g))
+            by, g = self.snap(y + nh, hs, tol)
+            if g is not None:
+                nh = max(by - y, 24)
+                self._guides.append(("h", g))
+            self.slots[self.sel] = (x, y, nw, nh)
+        self.redraw(quick=True)
+
+    def on_hover(self, ev):
+        """모서리에 오면 커서를 바꿔 크기 조절이 되는 곳임을 알린다."""
+        if getattr(self, "_drag", None):
+            return
+        px, py = self.to_pt(ev.x, ev.y)
+        i, mode = self.hit(px, py)
+        self.canvas.config(cursor="size_nw_se" if mode == "resize"
+                           else ("fleur" if mode == "move" else ""))
 
     def on_release(self, ev):
         d = getattr(self, "_drag", None)
         self._drag = None
+        self._guides = []
         rub = getattr(self, "_rubber", None)
         self._rubber = None
         if d and d["mode"] == "new" and rub and rub[2] > 25 and rub[3] > 20:
@@ -1911,6 +2067,9 @@ class App:
 
     def key_analyze(self, ev=None):
         self.analyze(); return "break"
+
+    def key_undo(self, ev=None):
+        return self.undo()
 
     def key_buildpdf(self, ev=None):
         self.build_pdf()
@@ -2136,6 +2295,7 @@ class App:
             messagebox.showerror("", "원고를 읽지 못했습니다. 로그를 보세요.")
             return
         self.ms_path = p
+        self.next_prob = 0
         self.problist.delete(0, "end")
         n_eq = n_img = 0
         for i, pr in enumerate(self.problems):
@@ -2151,6 +2311,7 @@ class App:
                                     "문제 파일이 맞는지 확인해 보세요.\n"
                                     "개념 정리 파일에는 문항이 없습니다.")
             return
+        self.show_progress()
         self.say("원고 읽음: %s (문항 %d, 수식 %d, 그림 %d). 목록을 두 번 누르면 고른 칸에 들어갑니다."
                  % (os.path.basename(p), len(self.problems), n_eq, n_img))
 
@@ -2172,14 +2333,24 @@ class App:
         if not self.slots:
             messagebox.showwarning("", "먼저 레이아웃을 분석하세요.")
             return
-        n = min(len(self.problems), len(self.slots))
+        start = self.next_prob
+        if start >= len(self.problems):
+            if not messagebox.askyesno("", "원고를 다 썼습니다.\n처음부터 다시 채울까요?"):
+                return
+            start = 0
+        self.snapshot("원고 채우기")
+        n = min(len(self.problems) - start, len(self.slots))
         for i in range(n):
-            self.texts[i] = ms.parts_to_markup(self.problems[i]["parts"])
+            self.texts[i] = ms.parts_to_markup(self.problems[start + i]["parts"])
+        self.next_prob = start + n
         self.editor.delete("1.0", "end")
         self.editor.insert("1.0", self.texts.get(self.sel, ""))
+        self._psize_key = None
         self.redraw()
-        self.say("문항 %d개를 칸에 채웠습니다. 남은 문항 %d개."
-                 % (n, len(self.problems) - n))
+        self.draw_rail()
+        self.show_progress()
+        self.say("%d번부터 %d번까지 %d개를 이 쪽에 채웠습니다. 남은 문항 %d개."
+                 % (start + 1, start + n, n, len(self.problems) - self.next_prob))
 
     # ------------------------------------------------------------ 편집
     def on_type(self, ev=None):
@@ -2295,7 +2466,7 @@ class App:
         finally:
             cv.destroy()
 
-    def page_size(self):
+    def page_size(self, quick=False):
         """지면 전체에서 쓸 글자 크기. 가장 빡빡한 칸에 맞춘다.
 
         칸마다 따로 정하면 한 쪽 안에서 문항마다 크기가 달라진다. 학생은 그
@@ -2303,6 +2474,8 @@ class App:
         key = (self.bodysize.get(), round(self.leading, 3), self.picked_font(),
                tuple(sorted((i, v) for i, v in self.texts.items() if v.strip())),
                tuple(tuple(round(v, 1) for v in s) for s in self.slots))
+        if quick and self._psize is not None:
+            return self._psize          # 끄는 동안은 이전 값을 그대로 쓴다
         if key != self._psize_key:
             worst = self.size_steps()[0]
             for i, (x, y, w, h) in enumerate(self.slots):
@@ -2411,7 +2584,7 @@ class App:
             self.say("  %.1f x %.1f mm, 이미지 %d개, 글자 %d자"
                      % (info["size_mm"][0], info["size_mm"][1], info["images"], info["chars"]))
             if info["images"] == 0:
-                self.say("  이미지 0개. 원본 디자인이 벡터 그대로 들어갔습니다.")
+                self.say("  원본 디자인을 그림으로 굽지 않고 그대로 넣었습니다. 확대해도 안 깨집니다.")
             for row in shrunk:
                 i, size, iscale, over = row[0], row[1], row[2], row[3]
                 nch = row[4] if len(row) > 4 else 0

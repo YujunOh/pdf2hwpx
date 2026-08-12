@@ -60,7 +60,16 @@ def _para_bits(p, imgs):
                         ref = q.get("binaryItemIDRef")
                         break
                 if ref:
-                    pics.append(ref)
+                    # 원고에 그림 크기가 이미 적혀 있다. 그걸 버리고 파일만
+                    # 가져오면 크기를 다시 정해야 한다. HWPUNIT 은 1pt 가 100
+                    sz = el.find(HP + "sz")
+                    wpt = 0.0
+                    if sz is not None:
+                        try:
+                            wpt = float(sz.get("width", 0)) / 100.0
+                        except Exception:
+                            wpt = 0.0
+                    pics.append((ref, wpt))
                     text.append(IMG_MARK)
     return "".join(text), eqs, pics
 
@@ -129,11 +138,15 @@ def _restore(text, eqs, pics, imgs):
             out.append("$%s$" % (eqs[ei] if ei < len(eqs) else ""))
             ei += 1
         elif ch == IMG_MARK:
-            ref = pics[pi] if pi < len(pics) else None
+            item = pics[pi] if pi < len(pics) else None
             pi += 1
+            ref, wpt = item if isinstance(item, tuple) else (item, 0.0)
             path = imgs.get(ref)
             if path:
-                out.append("\n[[img:%s]]\n" % path)
+                # 원고 판면을 A4에서 좌우 여백을 뺀 450pt로 보고 비율을 낸다.
+                # 크기를 안 적어 주면 칸 폭에 맞춰 늘어나 원고보다 커진다
+                pct = int(round(min(max(wpt / 450.0 * 100.0, 12), 99))) if wpt else 0
+                out.append("\n[[img:%s%s]]\n" % (path, "|%d" % pct if pct else ""))
         else:
             out.append(ch)
     return "".join(out)
