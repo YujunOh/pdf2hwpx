@@ -292,6 +292,8 @@ class App:
         self.bad_fonts = set()
         self._psize = None       # 지면 글자 크기 캐시
         self._psize_key = None
+        self._resize_job = None
+        self.zoom = None       # None 이면 지면 전체를 맞춘다
         # 쪽마다 칸과 글을 따로 담는다. 예전에는 한 벌만 들고 있어서 1쪽을
         # 채우고 2쪽으로 넘어가면 1쪽에 친 글이 그대로 날아갔다. 교재는
         # 한 권이 작업 단위인데 도구가 한 쪽만 기억하고 있었다
@@ -353,6 +355,8 @@ class App:
         p = tk.Menu(m, tearoff=0)
         p.add_command(label="이 쪽 다시 분석", accelerator="F5", command=self.analyze)
         p.add_separator()
+        p.add_command(label="이 쪽 칸 모두 지우기", command=self.clear_slots)
+        p.add_separator()
         p.add_command(label="기준 배치 저장...", command=self.save_layout)
         p.add_command(label="기준 배치 불러오기...", command=self.load_layout)
         m.add_cascade(label="쪽", menu=p)
@@ -362,17 +366,6 @@ class App:
                       command=self.load_manuscript)
         g.add_command(label="고른 칸부터 순서대로 채우기", command=self.autofill)
         m.add_cascade(label="원고", menu=g)
-
-        e = tk.Menu(m, tearoff=0)
-        e.add_command(label="배분 미리 보기", command=self.dry_run)
-        e.add_separator()
-        e.add_command(label="이 쪽만 PDF로", accelerator="Ctrl+P", command=self.build_pdf)
-        e.add_command(label="채운 쪽 전부 PDF로", command=self.build_filled)
-        e.add_command(label="원고를 여러 쪽에 부어 만들기", command=self.layout_all_pages)
-        e.add_separator()
-        e.add_command(label="한글 파일(HWPX)로", accelerator="Ctrl+B", command=self.build)
-        e.add_command(label="한글로 열어 확인", accelerator="F12", command=self.verify)
-        m.add_cascade(label="내보내기", menu=e)
 
         h = tk.Menu(m, tearoff=0)
         h.add_command(label="도움말", accelerator="F1", command=self.show_help)
@@ -427,7 +420,23 @@ class App:
         pane.pack(fill="both", expand=True, padx=8, pady=4)
         self.pane = pane
 
-        # --- 왼쪽: 항상 보이는 미리보기
+        # --- 맨 왼쪽: 쪽 목록. 교재 한 권이 작업 단위인데 한 쪽만 보이면
+        # 지금 어디쯤인지 알 수 없다
+        rail = ttk.Frame(pane, width=132)
+        pane.add(rail, weight=0)
+        ttk.Label(rail, text="쪽", padding=(6, 2)).pack(anchor="w")
+        self.rail = tk.Canvas(rail, bg="#f2f3f6", highlightthickness=0, width=126)
+        rbar = ttk.Scrollbar(rail, orient="vertical", command=self.rail.yview)
+        self.rail.configure(yscrollcommand=rbar.set)
+        rbar.pack(side="right", fill="y")
+        self.rail.pack(side="left", fill="both", expand=True)
+        self.rail.bind("<Button-1>", self.rail_click)
+        self.rail.bind("<MouseWheel>",
+                       lambda e: self.rail.yview_scroll(-e.delta // 120, "units"))
+        self._thumbs = {}          # {쪽번호: PhotoImage}
+        self._rail_rows = []       # [(y0, y1, 쪽번호)]
+
+        # --- 가운데: 항상 보이는 미리보기
         lf = ttk.LabelFrame(pane, text="미리보기 (원본 디자인 위에 새로 넣은 글)", padding=4)
         pane.add(lf, weight=3)
         self.canvas = tk.Canvas(lf, bg="#e9e9ee", highlightthickness=0, width=560)
@@ -436,7 +445,7 @@ class App:
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
         self.canvas.bind("<Button-3>", self.on_rclick)
-        self.canvas.bind("<Configure>", lambda e: self.redraw())
+        self.canvas.bind("<Configure>", self.on_resize)
         self.root.after(120, self.redraw)      # 첫 화면 안내
         bar = ttk.Frame(lf)
         bar.pack(fill="x", pady=(4, 0))
@@ -448,6 +457,13 @@ class App:
                         command=self.redraw).pack(side="left")
         ttk.Checkbutton(bar, text="벡터", variable=self.showvec,
                         command=self.redraw).pack(side="left", padx=6)
+        ttk.Label(bar, text="크기").pack(side="left", padx=(10, 2))
+        ttk.Button(bar, text="－", width=3,
+                   command=lambda: self.bump_zoom(-0.25)).pack(side="left")
+        self.zoomlabel = ttk.Label(bar, text="맞춤", width=6, anchor="center")
+        self.zoomlabel.pack(side="left")
+        ttk.Button(bar, text="＋", width=3,
+                   command=lambda: self.bump_zoom(0.25)).pack(side="left")
         self.status = ttk.Label(bar, text="", foreground="#555555")
         self.status.pack(side="right")
 
@@ -845,10 +861,12 @@ class App:
         self.announce(out, "%d쪽 · %.0f KB" % (len(jobs), info["bytes"] / 1024))
 
     def _place_sash(self):
+        """왼쪽 쪽 목록은 좁게 고정하고 나머지를 미리보기와 편집이 나눈다."""
         try:
             self.root.update_idletasks()
             w = self.root.winfo_width()
-            self.pane.sashpos(0, int(w * 0.53))
+            self.pane.sashpos(0, 138)
+            self.pane.sashpos(1, 138 + int((w - 138) * 0.56))
         except Exception:
             pass
 
@@ -1017,6 +1035,7 @@ class App:
             self.pagenote.config(text="칸 %d개%s"
                                       % (len(self.slots), " · 채움 %d" % n if n else ""))
             self.show_title()
+            self.draw_rail()
             self.redraw()
         except Exception:
             self.say(traceback.format_exc())
@@ -1210,7 +1229,122 @@ class App:
         return False
 
     # ------------------------------------------------------------ 미리보기
-    def page_image(self, view, px_w):
+    def clear_slots(self):
+        """이 쪽의 칸을 다 지운다. 목차나 개념 지면에 칸이 잘못 잡혔을 때
+        하나씩 오른쪽 단추로 지우는 것보다 빠르다."""
+        if not self.slots:
+            return
+        n = sum(1 for v in self.texts.values() if v.strip())
+        msg = "이 쪽 칸 %d개를 지울까요?" % len(self.slots)
+        if n:
+            msg += "\n채워 둔 글 %d개도 같이 지워집니다." % n
+        if not messagebox.askyesno("", msg):
+            return
+        self.slots = []
+        self.texts = {}
+        self.sel = 0
+        self._psize_key = None
+        self.redraw()
+        self.draw_rail()
+        self.say("이 쪽 칸을 모두 지웠습니다. 빈 곳을 끌어 새로 그릴 수 있습니다.")
+
+    def bump_zoom(self, d):
+        """미리보기 배율. 지면 전체를 한 화면에 넣으면 본문이 작을 수밖에
+        없어서, 크게 봐야 할 때 손으로 키운다."""
+        z = (self.zoom or 1.0) + d
+        self.zoom = None if z <= 1.0 else min(z, 4.0)
+        self.zoomlabel.config(text="맞춤" if self.zoom is None else "%d%%" % (self.zoom * 100))
+        self.redraw()
+
+    def rail_click(self, ev):
+        y = self.rail.canvasy(ev.y)
+        for y0, y1, pno in self._rail_rows:
+            if y0 <= y <= y1:
+                if pno != self.pageno.get():
+                    self.pageno.set(pno)
+                    self.page_changed()
+                return
+
+    def draw_rail(self):
+        """쪽 목록을 그린다. 어느 쪽에 칸이 있고 어디를 채웠는지 한눈에.
+
+        교재 한 권이 작업 단위인데 화면이 한 쪽에 묶여 있으면 지금 어디쯤인지
+        알 수 없다. 표지와 목차와 Note 가 섞여 있어 더 그렇다."""
+        cv = self.rail
+        cv.delete("all")
+        self._rail_rows = []
+        path = self.pdf_path.get()
+        if not path or not os.path.exists(path) or Image is None:
+            return
+        try:
+            doc = fitz.open(path)
+            total = doc.page_count
+        except Exception:
+            return
+        W, cur = 104, self.pageno.get()
+        y = 6
+        for pno in range(1, total + 1):
+            page = doc[pno - 1]
+            th = int(W * page.rect.height / max(page.rect.width, 1))
+            if pno not in self._thumbs:
+                try:
+                    pix = page.get_pixmap(matrix=fitz.Matrix(W / page.rect.width,
+                                                             W / page.rect.width),
+                                          alpha=False)
+                    im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                    self._thumbs[pno] = ImageTk.PhotoImage(im)
+                except Exception:
+                    self._thumbs[pno] = None
+            ph = self._thumbs.get(pno)
+            x = 10
+            if ph is not None:
+                cv.create_image(x, y, image=ph, anchor="nw")
+            cv.create_rectangle(x - 1, y - 1, x + W + 1, y + th + 1,
+                                outline="#2f6fd0" if pno == cur else "#c8ccd6",
+                                width=2 if pno == cur else 1)
+            st = self.pages.get((path, pno, self.side.get()))
+            n_slot = len(st["slots"]) if st else 0
+            n_fill = sum(1 for v in st["texts"].values() if v.strip()) if st else 0
+            cv.create_text(x + 2, y + th + 3, anchor="nw", text="%d" % pno,
+                           font=("맑은 고딕", -10, "bold"),
+                           fill="#2f6fd0" if pno == cur else "#6b7689")
+            if n_fill:
+                cv.create_text(x + W, y + th + 3, anchor="ne",
+                               text="채움 %d" % n_fill,
+                               font=("맑은 고딕", -9), fill="#1a6b3a")
+            elif n_slot:
+                cv.create_text(x + W, y + th + 3, anchor="ne",
+                               text="칸 %d" % n_slot,
+                               font=("맑은 고딕", -9), fill="#8892a6")
+            self._rail_rows.append((y, y + th + 16, pno))
+            y += th + 22
+        doc.close()
+        cv.config(scrollregion=(0, 0, 126, y))
+        # 지금 쪽이 보이게 스크롤을 맞춘다
+        for y0, y1, pno in self._rail_rows:
+            if pno == cur and y > 0:
+                cv.yview_moveto(max(y0 - 40, 0) / float(y))
+                break
+
+    def on_resize(self, ev=None):
+        """창 크기가 바뀌는 동안은 다시 굽지 않는다.
+
+        PDF 한 쪽을 굽는 데 180ms 가 든다. 창을 끄는 동안 Configure 가
+        초당 수십 번 오므로 매번 구우면 버벅이고 중간 상태가 보인다.
+        끄는 동안은 이미 구운 그림을 늘려 쓰고, 손을 뗀 뒤 한 번만 굽는다."""
+        if self._resize_job:
+            try:
+                self.root.after_cancel(self._resize_job)
+            except Exception:
+                pass
+        self.redraw(quick=True)
+        self._resize_job = self.root.after(180, self._resize_done)
+
+    def _resize_done(self):
+        self._resize_job = None
+        self.redraw()
+
+    def page_image(self, view, px_w, quick=False):
         """PDF 페이지를 그대로 구워 배경으로 쓴다.
 
         도형을 하나씩 다시 그리는 것보다 이쪽이 정확하다. 클리핑, 투명도,
@@ -1236,6 +1370,13 @@ class App:
                tuple(round(v, 1) for v in view), wipe)
         if key == self._bg_key and self._bg_img is not None:
             return self._bg_img
+        if quick and self._bg_img is not None:
+            # 크기만 다른 상황이면 있는 것을 늘려 쓴다. 다시 굽는 것보다
+            # 스무 배 싸고, 손을 떼면 곧바로 제 화질로 다시 그린다
+            w0, h0 = self._bg_img.size
+            if w0 > 0:
+                return self._bg_img.resize(
+                    (max(px_w, 1), max(int(px_w * h0 / w0), 1)), Image.BILINEAR)
 
         doc = None
         try:
@@ -1356,7 +1497,7 @@ class App:
         except Exception:
             pass
 
-    def redraw(self):
+    def redraw(self, quick=False):
         p = self.pdf_path.get()
         if not p or not os.path.exists(p) or not self.slots and not self.shapes:
             if not p or not os.path.exists(p):
@@ -1381,6 +1522,8 @@ class App:
         else:
             vx0, vy0, vx1, vy1 = 0.0, 0.0, self.page_w, self.page_h
             sc = min((cw - m * 2) / self.page_w, (ch - m * 2) / self.page_h)
+            if self.zoom:
+                sc *= self.zoom
             ox = (cw - self.page_w * sc) / 2
             oy = m
         if sc <= 0:
@@ -1395,7 +1538,7 @@ class App:
         img = None
         if not self.showvec.get():
             img = self.page_image((vx0, vy0, vx1, vy1),
-                                  int(round((vx1 - vx0) * sc)))
+                                  int(round((vx1 - vx0) * sc)), quick=quick)
         if img is not None:
             self._bg_photo = ImageTk.PhotoImage(img)
             cv.create_image(X(vx0), Y(vy0), image=self._bg_photo, anchor="nw")
