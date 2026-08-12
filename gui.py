@@ -48,7 +48,7 @@ DEFAULT_PDF = next((a for a in sys.argv[1:] if a.lower().endswith(".pdf")), "")
 # 것이다. cmd는 코드페이지에 따라 한글을 깨뜨리지만 dhp는 UTF-8 JSON이라 안전하다
 DEFAULT_PROJ = next((a for a in sys.argv[1:] if a.lower().endswith(".dhp")), "")
 
-MIN_W, MIN_H = 1180, 760
+MIN_W, MIN_H = 1340, 800
 
 SAMPLES = [
     "다음 식을 간단히 하시오.\n\n$(x+2y) ^{3} -(x-2y) ^{3}$\n\n"
@@ -326,12 +326,39 @@ class App:
         self._help = None
         self._text_boxes = []
         self.result_imgs = []
+        self._style()
         self._build()
         self._menubar()
         # 설치 폰트를 훑는 데 2초쯤 걸린다. 창을 띄운 뒤 뒤에서 채운다
         threading.Thread(target=self._load_fonts, daemon=True).start()
 
     # ------------------------------------------------------------ 화면
+    def _style(self):
+        """글자와 여백을 손본다. 기본값 9pt 는 오래 보기에 작다.
+
+        테마는 vista 를 그대로 쓴다. 윈도우 기본 모양이 낯설지 않다."""
+        import tkinter.font as tkf
+        for name, size in (("TkDefaultFont", 11), ("TkTextFont", 11),
+                           ("TkMenuFont", 11), ("TkHeadingFont", 11),
+                           ("TkTooltipFont", 10)):
+            try:
+                tkf.nametofont(name).configure(family="맑은 고딕", size=size)
+            except Exception:
+                pass
+        st = ttk.Style()
+        st.configure(".", font=("맑은 고딕", 11))
+        st.configure("TButton", padding=(10, 6))
+        st.configure("TLabelframe.Label", font=("맑은 고딕", 11, "bold"),
+                     foreground="#22314c")
+        st.configure("TLabelframe", padding=6)
+        st.configure("TCheckbutton", padding=(2, 3))
+        st.configure("Treeview", rowheight=26)
+        st.configure("Treeview.Heading", font=("맑은 고딕", 10, "bold"))
+        # 주된 행동은 눈에 띄게. 나머지와 같은 무게면 무엇부터 할지 모른다
+        st.configure("Go.TButton", font=("맑은 고딕", 11, "bold"), padding=(12, 7))
+        st.configure("Small.TButton", padding=(4, 2))
+        self.root.option_add("*Font", ("맑은 고딕", 11))
+
     def _menubar(self):
         """성격이 다른 명령이 상단에 같은 무게로 늘어서 있었다. 자주 쓰는
         셋만 도구 모음에 남기고 나머지는 메뉴로 접는다."""
@@ -383,12 +410,15 @@ class App:
         top.pack(fill="x")
         # 자주 쓰는 것만 남긴다. 나머지는 메뉴로 접었다. 성격이 다른 명령이
         # 같은 무게로 늘어서 있으면 무엇이 중요한지 알 수 없다
-        ttk.Button(top, text="원고 불러오기",
+        ttk.Button(top, text="원고 불러오기", style="Go.TButton",
                    command=self.load_manuscript).pack(side="left")
         ttk.Button(top, text="배분 미리 보기",
                    command=self.dry_run).pack(side="left", padx=6)
-        ttk.Button(top, text="내보내기 ▾",
+        ttk.Button(top, text="내보내기 ▾", style="Go.TButton",
                    command=self.export_menu).pack(side="left")
+        self.undobtn = ttk.Button(top, text="↩ 되돌리기", state="disabled",
+                                  command=self.undo)
+        self.undobtn.pack(side="left", padx=(10, 0))
 
         ttk.Label(top, text="  쪽").pack(side="left", padx=(14, 0))
         ttk.Button(top, text="◀", width=3, command=lambda: self.step_page(-1)).pack(side="left")
@@ -527,10 +557,22 @@ class App:
         ttk.Button(row, text="전체 예시", width=9, command=self.fill_all).pack(side="left")
         ttk.Button(row, text="비우기", width=7, command=self.clear_slot).pack(side="left", padx=2)
 
-        pal = ttk.Frame(sf)
+        self.imgrow = ttk.Frame(sf)
+        self.imglabel = ttk.Label(self.imgrow, text="", foreground="#2f6fd0")
+        self.imglabel.pack(side="left")
+        ttk.Button(self.imgrow, text="－", width=3, style="Small.TButton",
+                   command=lambda: self.bump_img(-5)).pack(side="left", padx=(8, 2))
+        ttk.Button(self.imgrow, text="＋", width=3, style="Small.TButton",
+                   command=lambda: self.bump_img(5)).pack(side="left")
+        ttk.Button(self.imgrow, text="원고 크기", style="Small.TButton",
+                   command=self.reset_img).pack(side="left", padx=6)
+        ttk.Label(self.imgrow, text="글 안의 |숫자 를 고쳐도 됩니다",
+                  foreground="#8892a6").pack(side="left", padx=6)
+
+        self.pal = pal = ttk.Frame(sf)
         pal.pack(fill="x", pady=(6, 2))
         for i, (label, code) in enumerate(EQ_PALETTE):
-            ttk.Button(pal, text=label, width=8,
+            ttk.Button(pal, text=label, style="Small.TButton",
                        command=lambda c=code: self.insert_eq(c)).grid(
                            row=i // 6, column=i % 6, padx=1, pady=1, sticky="ew")
         for c in range(6):
@@ -875,7 +917,7 @@ class App:
             self.root.update_idletasks()
             w = self.root.winfo_width()
             self.pane.sashpos(0, 138)
-            self.pane.sashpos(1, 138 + int((w - 138) * 0.56))
+            self.pane.sashpos(1, 138 + int((w - 138) * 0.52))
         except Exception:
             pass
 
@@ -1282,6 +1324,73 @@ class App:
         self.draw_rail()
         self.say("이 쪽 칸을 모두 지웠습니다. 빈 곳을 끌어 새로 그릴 수 있습니다.")
 
+    def img_marks(self, txt=None):
+        """이 칸에 든 그림 마크업 목록. (시작, 끝, 경로, 폭%)"""
+        t = self.texts.get(self.sel, "") if txt is None else txt
+        out = []
+        for m in IMG_RE.finditer(t):
+            out.append((m.start(), m.end(), m.group(1),
+                        int(m.group(2)) if m.group(2) else 0))
+        return out
+
+    def show_imgrow(self):
+        """그림이 든 칸을 고르면 크기 조절 줄을 띄운다.
+
+        예전에는 글 안의 대괄호 숫자를 직접 고치는 수밖에 없었고, 그런 게
+        있는지도 알기 어려웠다."""
+        marks = self.img_marks()
+        if not marks:
+            self.imgrow.pack_forget()
+            return
+        pct = marks[0][3] or 99
+        self.imglabel.config(text="그림 %d개 · 폭 %d%%"
+                                  % (len(marks), pct))
+        self.imgrow.pack(fill="x", pady=(6, 0), before=self.pal)
+
+    def _set_img_pct(self, pct):
+        marks = self.img_marks()
+        if not marks:
+            return
+        self.snapshot("그림 크기")
+        t = self.texts.get(self.sel, "")
+        out, last = [], 0
+        for a, b, path, _ in marks:
+            out.append(t[last:a])
+            out.append("[[img:%s|%d]]" % (path, pct) if pct else "[[img:%s]]" % path)
+            last = b
+        out.append(t[last:])
+        self.texts[self.sel] = "".join(out)
+        self.editor.delete("1.0", "end")
+        self.editor.insert("1.0", self.texts[self.sel])
+        self._psize_key = None
+        self.redraw()
+        self.show_imgrow()
+
+    def bump_img(self, d):
+        marks = self.img_marks()
+        if not marks:
+            return
+        cur = marks[0][3] or 99
+        self._set_img_pct(max(min(cur + d, 99), 10))
+
+    def reset_img(self):
+        """원고에 적혀 있던 크기로 되돌린다."""
+        marks = self.img_marks()
+        if not marks:
+            return
+        want = 0
+        for pr in getattr(self, "problems", []):
+            for m in IMG_RE.finditer(ms.parts_to_markup(pr["parts"])):
+                if m.group(1) == marks[0][2] and m.group(2):
+                    want = int(m.group(2))
+                    break
+            if want:
+                break
+        if not want:
+            messagebox.showinfo("", "원고에 적힌 크기를 찾지 못했습니다.")
+            return
+        self._set_img_pct(want)
+
     def snapshot(self, what):
         """되돌리기용으로 지금 상태를 담아 둔다. 한 번에 여러 칸이 바뀌는
         일에는 되돌릴 길이 있어야 한다."""
@@ -1303,6 +1412,7 @@ class App:
         self.redraw()
         self.draw_rail()
         self.show_progress()
+        self.refresh_side()
         self.say("되돌렸습니다: %s" % what)
         return "break"
 
@@ -1751,7 +1861,7 @@ class App:
     def select(self, i):
         self.sel = i
         if 0 <= i < len(self.slots):
-            self._show_sel()
+            self.refresh_side()
         self.editor.delete("1.0", "end")
         self.editor.insert("1.0", self.texts.get(i, ""))
 
@@ -1888,7 +1998,7 @@ class App:
         self.redraw()
 
     def reindex(self):
-        self._show_sel()
+        self.refresh_side()
 
     def sync_slots(self, clear=False):
         """슬롯 개수가 바뀌면 남는 글과 선택 위치를 정리한다.
@@ -1905,9 +2015,9 @@ class App:
         self.sel = min(self.sel, n - 1) if n else 0
         self.reindex()
         if self.slots:
-            self._show_sel()
+            self.refresh_side()
         else:
-            self._show_sel()
+            self.refresh_side()
         return dropped
 
     # ------------------------------------------------------------ 도움말
@@ -2349,15 +2459,25 @@ class App:
         self.redraw()
         self.draw_rail()
         self.show_progress()
+        self.refresh_side()
         self.say("%d번부터 %d번까지 %d개를 이 쪽에 채웠습니다. 남은 문항 %d개."
                  % (start + 1, start + n, n, len(self.problems) - self.next_prob))
 
     # ------------------------------------------------------------ 편집
     def on_type(self, ev=None):
         self.texts[self.sel] = self.editor.get("1.0", "end-1c")
+        self.refresh_side()
         if self._job:
             self.root.after_cancel(self._job)
         self._job = self.root.after(220, self.redraw)
+
+    def refresh_side(self):
+        self._show_sel()
+        try:
+            self.show_imgrow()
+            self.undobtn.config(state="normal" if self._undo else "disabled")
+        except Exception:
+            pass
 
     def _show_sel(self):
         """지금 고른 칸을 글로 알린다. 사람은 1번부터 센다."""
